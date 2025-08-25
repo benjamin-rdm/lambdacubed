@@ -1,0 +1,50 @@
+cabal-version:      3.8
+name:               lambdacubed
+version:            0.1.0.0
+description:        See README.md
+license:            BSD-3-Clause
+license-file:       LICENSE
+author:             Benjamin Riedemann
+maintainer:         benjamin.riedemann@rwth-aachen.de
+homepage:           https://github.com/benjamin-rdm/lambdacubed#readme
+bug-reports:        https://github.com/benjamin-rdm/lambdacubed/issues
+category:           Game
+build-type:         Simple
+extra-source-files:
+  README.md
+  ChangeLog.md
+
+tested-with:
+  GHC == 9.6.* || == 9.8.* || == 9.10.*
+
+common common-opts
+  default-language: GHC2021
+  ghc-options:
+    -Wall -Wcompat -Wunused-packages -Werror -fspecialise-aggressively -fstatic-argument-transformation
+
+executable lambdacubed-exe
+  import:         common-opts
+  hs-source-dirs: app src
+  main-is:        Main.hs
+  other-modules:
+      App.Config
+      Rendering.Camera
+      Utils.Math
+      Utils.PerlinNoise
+      Rendering.Texture
+      Game.World
+      Game.ChunkManager
+      Game.Physics
+      Rendering.Shaders
+      Game.WorldSource
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2 -fllvm -optlo-O3 -funbox-strict-fields -fexcess-precision
+  build-depends:
+      base
+    , OpenGL
+    , GLFW-b
+    , bytestring
+    , JuicyPixels
+    , vector
+    , linear
+    , containers
+    , mtl

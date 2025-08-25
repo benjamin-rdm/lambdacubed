@@ -1,0 +1,10 @@
+packages: .
+
+optimization: 2
+
+package lambdacubed
+  optimization: 2
+  ghc-options: -fllvm -optlo-O3 -funbox-strict-fields -fexcess-precision -fspecialise-aggressively
+
+program-options
+  ghc-options: -fllvm
