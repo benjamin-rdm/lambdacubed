@@ -1,4 +1,4 @@
-# lambdacubed
+# lambdacubed $\lambda^3$
 
 A small reimplementation of early Minecraft in pure Haskell using OpenGL.
 
