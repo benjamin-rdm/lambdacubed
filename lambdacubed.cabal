@@ -38,7 +38,7 @@ executable lambdacubed-exe
       Game.Physics
       Rendering.Shaders
       Game.WorldSource
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2 -fllvm -optlo-O3 -funbox-strict-fields -fexcess-precision
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2 -optlo-O3 -funbox-strict-fields -fexcess-precision
   build-depends:
       base
     , OpenGL
