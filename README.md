@@ -19,5 +19,3 @@ Things that would be nice to have if I find the time or anyone else feels like c
 
 ## Known bugs
 - [ ] Player can place blocks inside himself.
-- [ ] World generation repeats vertically.
-- [ ] Side vertices of water are part of water mesh, even if they border water on the side. This is the same behavior as for the opaque block mesh, but in this case it is a problem.

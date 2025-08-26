@@ -27,11 +27,11 @@ import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (Storable (..), sizeOf)
 import GHC.Generics (Generic)
+import Game.WorldConfig (worldChunkSize)
 import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Linear
 import Utils.PerlinNoise (perlin2)
-import Game.WorldConfig (worldChunkSize)
 
 calculateNoise :: Float -> Float -> Float -> Float -> Float -> Float
 calculateNoise x y baseFreq scaleX scaleY =
@@ -233,6 +233,15 @@ dirOffset PosZ = V3 0 0 1
 
 data TextureDirection = NegX | PosX | NegY | PosY | NegZ | PosZ deriving (Eq, Show)
 
+invertTextureDirection :: TextureDirection -> TextureDirection
+invertTextureDirection td = case td of
+  NegX -> PosX
+  NegY -> PosY
+  NegZ -> PosZ
+  PosX -> NegX
+  PosY -> NegY
+  PosZ -> NegZ
+
 data Block
   = Air
   | Dirt
@@ -335,9 +344,11 @@ buildWaterVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
             Water ->
               concat
                 [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
+                      (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
+                      -- Render water from below the surface
                       layer = textureLayerOf Water dir
-                   in face v1 v2 v3 v4 layer
-                  | dir <- [NegX, PosX, NegY, PosY, NegZ, PosZ],
+                   in face v1 v2 v3 v4 layer ++ face v5 v6 v7 v8 layer
+                  | dir <- [PosZ], -- Do not render side vertices for water
                     let neighborPos = worldPosI + dirOffset dir,
                     blockAtV3 chunk neighborPos == Air
                 ]
