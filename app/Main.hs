@@ -10,7 +10,7 @@ import Data.Map.Strict qualified as M
 import Data.Maybe (fromMaybe)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (nullPtr, plusPtr)
-import Game.ChunkManager
+import Game.WorldManager
 import Game.Physics
 import Game.World
 import Graphics.Rendering.OpenGL (($=))
@@ -379,8 +379,8 @@ initializeGameState fogStartVal fogEndVal fogColor uFogStart uFogEnd uFogColor =
   GL.uniform uFogEnd $= fogEndVal
   GL.uniform uFogColor $= fogColor
 
-  let startCoord = chunkCoordOf defaultChunkSize (V3 32 32 50)
-      desired = [V3 (cx + dx) (cy + dy) cz | let V3 cx cy cz = startCoord, dx <- [-3 .. 3], dy <- [-3 .. 3]]
+  let startCoord = chunkCoordOf (V3 32 32 50)
+      desired = [V2 (cx + dx) (cy + dy) | let V2 cx cy = startCoord, dx <- [-3 .. 3], dy <- [-3 .. 3]]
   cmSeeded <- execChunkManager defaultChunkManagerConfig initialChunkManagerState $ do
     mapM_ loadChunk desired
   writeIORef cmRef cmSeeded

@@ -7,6 +7,7 @@ module Game.World
     defaultWorldGenConfig,
     blockOpaque,
     genTerrainChunk,
+    genTerrainChunkAtCoord,
     buildTerrainVertices,
     buildWaterVertices,
     TerrainChunk (..),
@@ -30,6 +31,7 @@ import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Linear
 import Utils.PerlinNoise (perlin2)
+import Game.WorldConfig (worldChunkSize)
 
 calculateNoise :: Float -> Float -> Float -> Float -> Float -> Float
 calculateNoise x y baseFreq scaleX scaleY =
@@ -93,12 +95,21 @@ data TerrainChunk = TerrainChunk
 
 type WorldGen = Reader WorldGenConfig
 
-genTerrainChunk :: V3 Int -> V3 Int -> TerrainChunk
-genTerrainChunk origin size = runReader (genTerrainChunkM origin size) defaultWorldGenConfig
+-- Generate a chunk at a given world-space origin using the fixed worldChunkSize
+genTerrainChunk :: V3 Int -> TerrainChunk
+genTerrainChunk origin = runReader (genTerrainChunkM origin) defaultWorldGenConfig
 
-genTerrainChunkM :: V3 Int -> V3 Int -> WorldGen TerrainChunk
-genTerrainChunkM org@(V3 ox oy _oz) siz@(V3 sx sy sz) = do
+-- Generate a TerrainChunk given a 2D chunk coordinate using the fixed worldChunkSize
+genTerrainChunkAtCoord :: V2 Int -> TerrainChunk
+genTerrainChunkAtCoord (V2 cx cy) =
+  let V3 sx sy _ = worldChunkSize
+      origin = V3 (cx * sx) (cy * sy) 0
+   in genTerrainChunk origin
+
+genTerrainChunkM :: V3 Int -> WorldGen TerrainChunk
+genTerrainChunkM org@(V3 ox oy _oz) = do
   config <- ask
+  let V3 sx sy sz = worldChunkSize
   let !totalSize = sx * sy * sz
       !xySize = sx * sy
 
@@ -125,7 +136,7 @@ genTerrainChunkM org@(V3 ox oy _oz) siz@(V3 sx sy sz) = do
                       else Stone
 
       !baseBlocks = VS.generate totalSize getBlock
-      !baseChunk = TerrainChunk org siz baseBlocks
+      !baseChunk = TerrainChunk org worldChunkSize baseBlocks
   generateTreesM baseChunk
 
 generateTreesM :: TerrainChunk -> WorldGen TerrainChunk

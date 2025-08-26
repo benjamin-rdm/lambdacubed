@@ -11,7 +11,6 @@ import qualified Data.Vector.Storable as V
 import qualified Graphics.Rendering.OpenGL.GL as GL
 import Graphics.Rendering.OpenGL (($=))
 
--- Helper constants
 defaultBlockTexturePaths :: [FilePath]
 defaultBlockTexturePaths = [
   "resource_pack/assets/minecraft/textures/block/grass_block_top_green.png",
@@ -25,16 +24,12 @@ defaultBlockTexturePaths = [
   "resource_pack/assets/minecraft/textures/block/oak_leaves.png"
   ]
 
--- Helper functions for common patterns
-loadImageFromPath :: FilePath -> IO (Either String DynamicImage)
-loadImageFromPath = readPng
-
 convertImageToRGBA :: DynamicImage -> Image PixelRGBA8
 convertImageToRGBA = convertRGBA8
 
 loadImageSafe :: FilePath -> IO (Image PixelRGBA8)
 loadImageSafe path = do
-  result <- loadImageFromPath path
+  result <- readPng path
   case result of
     Right dynImg -> pure $ convertImageToRGBA dynImg
     Left err -> fail $ "Failed to load texture " ++ path ++ ": " ++ err

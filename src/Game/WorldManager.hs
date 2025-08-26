@@ -1,14 +1,12 @@
-module Game.ChunkManager
+module Game.WorldManager
   ( ChunkHandle (..),
     ChunkCoord,
     ChunkMap,
-    defaultChunkSize,
     ChunkManagerConfig (..),
     ChunkManagerState (..),
     ChunkManager,
     defaultChunkManagerConfig,
     initialChunkManagerState,
-    getChunkSize,
     chunkWorldOrigin,
     chunkCoordOf,
     getBlockAtWorld,
@@ -24,11 +22,8 @@ module Game.ChunkManager
     execChunkManager,
     evalChunkManager,
     raycastBlockData,
-    RaycastConfig (..),
-    RaycastState (..),
-    RaycastResult (..),
     buildChunkAtIO,
-    blockQueryFromChunkMap,
+    blockQueryFromChunkMap
   )
 where
 
@@ -43,42 +38,34 @@ import Game.WorldSource
 import Linear hiding (nearZero)
 import qualified App.Config as C
 
-defaultChunkSize :: V3 Int
-defaultChunkSize = V3 64 64 64
-
-calculateDistance :: V3 Int -> V3 Int -> Float
+calculateDistance :: V2 Int -> V2 Int -> Float
 calculateDistance a b = sqrt $ fromIntegral $ quadrance (a - b)
 
-chunkWorldOriginFromCoord :: V3 Int -> V3 Int -> V3 Int
-chunkWorldOriginFromCoord chunkSize (V3 cx cy cz) = V3 (cx * sx) (cy * sy) (cz * sz)
+chunkWorldOrigin :: V2 Int -> V3 Int
+chunkWorldOrigin (V2 cx cy) = V3 (cx * sx) (cy * sy) 0
   where
-    V3 sx sy sz = chunkSize
+    V3 sx sy _ = worldChunkSize
 
-chunkCoordFromWorldPos :: V3 Int -> V3 Float -> V3 Int
-chunkCoordFromWorldPos chunkSize (V3 x y z) =
-  V3
-    (floor (x / fromIntegral sx))
-    (floor (y / fromIntegral sy))
-    (floor (z / fromIntegral sz))
+chunkCoordOf :: V3 Float -> V2 Int
+chunkCoordOf (V3 x y _z) = V2 (floor (x / fromIntegral sx)) (floor (y / fromIntegral sy))
   where
-    V3 sx sy sz = chunkSize
+    V3 sx sy _ = worldChunkSize
 
 data ChunkHandle = ChunkHandle
-  { chCoord :: !(V3 Int),
+  { chCoord :: !(V2 Int),
     chOrigin :: !(V3 Int),
     chData :: !TerrainChunk,
     chOpaque :: !ChunkMesh,
     chWater :: !ChunkMesh
   }
 
-type ChunkCoord = V3 Int
+type ChunkCoord = V2 Int
 
 type ChunkMap = M.Map ChunkCoord ChunkHandle
 
 data ChunkManagerConfig = ChunkManagerConfig
   { cmcRenderDistance :: !Int,
     cmcMaxChunksPerFrame :: !Int,
-    cmcChunkSize :: !(V3 Int),
     cmcWorldSource :: !WorldSource
   }
 
@@ -94,8 +81,8 @@ defaultChunkManagerConfig =
   ChunkManagerConfig
     { cmcRenderDistance = C.renderDistance,
       cmcMaxChunksPerFrame = 1,
+      -- 
       -- Reduce the amount of chunks loaded by frame reduce CPU-limited frame times during world generation
-      cmcChunkSize = defaultChunkSize,
       cmcWorldSource = generatedTerrian
     }
 
@@ -106,27 +93,16 @@ initialChunkManagerState =
       cmsPlayerPos = V3 0 0 0
     }
 
-getChunkSize :: ChunkManager (V3 Int)
-getChunkSize = asks cmcChunkSize
-
-chunkWorldOrigin :: V3 Int -> V3 Int -> V3 Int
-chunkWorldOrigin = chunkWorldOriginFromCoord
-
-chunkCoordOf :: V3 Int -> V3 Float -> V3 Int
-chunkCoordOf = chunkCoordFromWorldPos
-
-distanceToPlayer :: V3 Int -> ChunkManager Float
+distanceToPlayer :: V2 Int -> ChunkManager Float
 distanceToPlayer coord = do
   playerPos <- gets cmsPlayerPos
-  chunkSize <- getChunkSize
-  let playerChunk = chunkCoordOf chunkSize playerPos
+  let playerChunk = chunkCoordOf playerPos
   pure $ calculateDistance coord playerChunk
 
 getBlockAtWorld :: V3 Int -> ChunkManager Block
 getBlockAtWorld pos = do
-  chunkSize <- getChunkSize
   chunks <- gets cmsLoadedChunks
-  let cc = chunkCoordOf chunkSize (fromIntegral <$> pos)
+  let cc = chunkCoordOf (fromIntegral <$> pos)
       defaultBlock = Air
   pure $ case M.lookup cc chunks of
     Nothing -> defaultBlock
@@ -134,16 +110,15 @@ getBlockAtWorld pos = do
 
 setBlockAtWorld :: V3 Int -> Block -> ChunkManager Bool
 setBlockAtWorld pos newBlock = do
-  chunkSize <- getChunkSize
   chunks <- gets cmsLoadedChunks
-  let cc = chunkCoordOf chunkSize (fromIntegral <$> pos)
+  let cc = chunkCoordOf (fromIntegral <$> pos)
   case M.lookup cc chunks of
     Nothing -> pure False
     Just h -> do
       case setBlockInChunk (chData h) pos newBlock of
         Nothing -> pure False
         Just newChunk -> do
-          -- Immediately rebuild meshes for this chunk
+          -- Rebuild meshes for this chunk
           let verts = buildTerrainVertices newChunk
               wverts = buildWaterVertices newChunk
           liftIO $ deleteChunkMesh (chOpaque h)
@@ -155,30 +130,28 @@ setBlockAtWorld pos newBlock = do
           modify $ \s -> s {cmsLoadedChunks = updatedChunks}
           pure True
 
-buildChunkAt :: V3 Int -> ChunkManager ChunkHandle
+buildChunkAt :: V2 Int -> ChunkManager ChunkHandle
 buildChunkAt coord = do
-  chunkSize <- getChunkSize
   ws <- asks cmcWorldSource
-  terrainChunk <- liftIO $ ws coord chunkSize
-  let origin = chunkWorldOrigin chunkSize coord
+  terrainChunk <- liftIO $ ws coord
+  let origin = chunkWorldOrigin coord
       verts = buildTerrainVertices terrainChunk
       wverts = buildWaterVertices terrainChunk
   opaqueMesh <- liftIO $ uploadChunk verts
   waterMesh <- liftIO $ uploadChunk wverts
   pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh
 
-buildChunkAtIO :: WorldSource -> V3 Int -> IO ChunkHandle
+buildChunkAtIO :: WorldSource -> V2 Int -> IO ChunkHandle
 buildChunkAtIO ws coord = do
-  let chunkSize = defaultChunkSize
-      origin = chunkWorldOrigin chunkSize coord
-  terrainChunk <- ws coord chunkSize
+  let origin = chunkWorldOrigin coord
+  terrainChunk <- ws coord
   let verts = buildTerrainVertices terrainChunk
       wverts = buildWaterVertices terrainChunk
   opaqueMesh <- uploadChunk verts
   waterMesh <- uploadChunk wverts
   pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh
 
-loadChunk :: V3 Int -> ChunkManager ()
+loadChunk :: V2 Int -> ChunkManager ()
 loadChunk coord = do
   chunks <- gets cmsLoadedChunks
   unless (M.member coord chunks) $ do
@@ -194,33 +167,28 @@ unloadChunkHandle (ChunkHandle coord _ _ om wm) = do
 updatePlayerPosition :: V3 Float -> ChunkManager ()
 updatePlayerPosition pos = modify $ \s -> s {cmsPlayerPos = pos}
 
-getDesiredChunks :: ChunkManager [V3 Int]
+getDesiredChunks :: ChunkManager [V2 Int]
 getDesiredChunks = do
   renderDistance <- asks cmcRenderDistance
   playerPos <- gets cmsPlayerPos
-  chunkSize <- getChunkSize
-  let playerChunk = chunkCoordOf chunkSize playerPos
-      V3 cx cy cz = playerChunk
-  return [V3 (cx + dx) (cy + dy) cz | dx <- [-renderDistance .. renderDistance], dy <- [-renderDistance .. renderDistance]]
+  let playerChunk = chunkCoordOf playerPos
+      V2 cx cy = playerChunk
+  pure [V2 (cx + dx) (cy + dy) | dx <- [-renderDistance .. renderDistance], dy <- [-renderDistance .. renderDistance]]
 
-prioritizeChunks :: [V3 Int] -> ChunkManager [V3 Int]
+prioritizeChunks :: [V2 Int] -> ChunkManager [V2 Int]
 prioritizeChunks coords = do
   distances <- mapM (\coord -> (,) coord <$> distanceToPlayer coord) coords
-  return $ map fst $ sortOn snd distances
+  pure $ map fst $ sortOn snd distances
 
 updateChunks :: ChunkManager ()
 updateChunks = do
   desired <- getDesiredChunks
   loaded <- gets (M.keys . cmsLoadedChunks)
-
   let toLoad = filter (`notElem` loaded) desired
       toUnload = filter (`notElem` desired) loaded
-
   prioritizedToLoad <- prioritizeChunks toLoad
   maxPerFrame <- asks cmcMaxChunksPerFrame
-
   mapM_ loadChunk (take maxPerFrame prioritizedToLoad)
-
   loadedChunks <- gets cmsLoadedChunks
   mapM_ (unloadChunkHandle . (loadedChunks M.!)) (take maxPerFrame toUnload)
 
@@ -239,112 +207,38 @@ evalChunkManager :: ChunkManagerConfig -> ChunkManagerState -> ChunkManager a ->
 evalChunkManager config initialState action =
   evalStateT (runReaderT action config) initialState
 
-stepI :: Float -> Int
-stepI a
-  | a > 0 = 1
-  | a < 0 = -1
-  | otherwise = 0
-
-data RaycastConfig = RaycastConfig
-  { rcMaxDistance :: !Float,
-    rcMaxSteps :: !Int
-  }
-  deriving (Eq, Show)
-
-defaultRaycastConfig :: RaycastConfig
-defaultRaycastConfig =
-  RaycastConfig
-    { rcMaxDistance = 100.0,
-      rcMaxSteps = 200
-    }
-
-data RaycastState = RaycastState
-  { rsPosition :: !(V3 Int),
-    rsTMax     :: !(V3 Float),
-    rsStep     :: !(V3 Int),
-    rsDelta    :: !(V3 Float)
-  }
-  deriving (Eq, Show)
-
-data RaycastResult = RaycastResult
-  { rrHitPosition :: !(V3 Int),
-    rrFaceNormal :: !(V3 Int),
-    rrDistance :: !Float
-  }
-  deriving (Eq, Show)
-
 raycastBlockData :: ChunkMap -> V3 Float -> V3 Float -> Float -> Maybe (V3 Int, V3 Int)
-raycastBlockData cm origin dir maxDist =
-  let config = defaultRaycastConfig {rcMaxDistance = maxDist}
-   in fmap
-        (\result -> (rrHitPosition result, rrFaceNormal result))
-        (raycastBlockDataWithConfig cm origin dir config)
-
-raycastBlockDataWithConfig :: ChunkMap -> V3 Float -> V3 Float -> RaycastConfig -> Maybe RaycastResult
-raycastBlockDataWithConfig cm origin dirInput config
+raycastBlockData cm origin dirInput maxDist
   | nearZero dirInput = Nothing
   | otherwise =
       let dir = normalize dirInput
-          raycastState = initializeRaycastState origin dir
+          stepSize = 0.1 :: Float
+          steps :: Int
+          steps = max 1 (floor (maxDist / stepSize))
+          startCell = floor <$> origin :: V3 Int
           isSolid v = let b = blockQueryFromChunkMap cm v in b /= Air && blockOpaque b
-       in traceRay raycastState isSolid config
+          go :: V3 Int -> V3 Float -> Int -> Maybe (V3 Int, V3 Int)
+          go _ _ i | i > steps = Nothing
+          go prevCell pos i =
+            let pos' = pos + stepSize *^ dir
+                cell' = floor <$> pos' :: V3 Int
+             in if isSolid cell'
+                  then Just (cell', entryNormal prevCell cell' dir)
+                  else go cell' pos' (i + 1)
+       in go startCell origin (0 :: Int)
 
-initializeRaycastState :: V3 Float -> V3 Float -> RaycastState
-initializeRaycastState origin dir =
-  let V3 ox oy oz = origin
-      V3 dx dy dz = dir
-      stepV@(V3 sx sy sz) = stepI <$> dir
-      voxel0@(V3 vx vy vz) = floor <$> origin :: V3 Int
-      nextBoundary v s = if s > 0 then fromIntegral (v + 1) else fromIntegral v
-      t a o v s = if a == 0 then (1/0) else (nextBoundary v s - o) / a
-      d a = if a == 0 then (1/0) else abs (1 / a)
-      tMaxV = V3 (t dx ox vx sx) (t dy oy vy sy) (t dz oz vz sz)
-      deltaV = V3 (d dx) (d dy) (d dz)
-   in RaycastState
-        { rsPosition = voxel0,
-          rsTMax     = tMaxV,
-          rsStep     = stepV,
-          rsDelta    = deltaV
-        }
-
-traceRay :: RaycastState -> (V3 Int -> Bool) -> RaycastConfig -> Maybe RaycastResult
-traceRay s0 isSolid cfg = go (rcMaxSteps cfg) s0
-  where
-    go 0 _ = Nothing
-    go n s
-      | isSolid (rsPosition s) = Just RaycastResult { rrHitPosition = rsPosition s
-                                                    , rrFaceNormal  = V3 0 0 0
-                                                    , rrDistance    = 0 }
-      | otherwise =
-          let V3 tx ty tz = rsTMax s
-              V3 sx sy sz = rsStep s
-              V3 dx dy dz = rsDelta s
-           in if tx < ty && tx < tz then
-                let newPos  = rsPosition s + V3 sx 0 0
-                    newTMax = V3 (tx + dx) ty tz
-                 in advance newPos newTMax (V3 (-sx) 0 0) (tx + dx) n s
-              else if ty < tz then
-                let newPos  = rsPosition s + V3 0 sy 0
-                    newTMax = V3 tx (ty + dy) tz
-                 in advance newPos newTMax (V3 0 (-sy) 0) (ty + dy) n s
-              else
-                let newPos  = rsPosition s + V3 0 0 sz
-                    newTMax = V3 tx ty (tz + dz)
-                 in advance newPos newTMax (V3 0 0 (-sz)) (tz + dz) n s
-
-    advance newPos newTMax normal dist n s =
-      let s' = s { rsPosition = newPos, rsTMax = newTMax }
-       in if dist > rcMaxDistance cfg
-            then Nothing
-            else if isSolid newPos
-              then Just RaycastResult { rrHitPosition = newPos
-                                      , rrFaceNormal  = normal
-                                      , rrDistance    = dist }
-              else go (n - 1) s'
+entryNormal :: V3 Int -> V3 Int -> V3 Float -> V3 Int
+entryNormal (V3 ax ay az) (V3 bx by bz) (V3 dx dy dz)
+  | bx /= ax && abs dx >= abs dy && abs dx >= abs dz = if bx > ax then V3 (-1) 0 0 else V3 1 0 0
+  | by /= ay && abs dy >= abs dz = if by > ay then V3 0 (-1) 0 else V3 0 1 0
+  | bz /= az = if bz > az then V3 0 0 (-1) else V3 0 0 1
+  | abs dx >= abs dy && abs dx >= abs dz = if dx > 0 then V3 (-1) 0 0 else V3 1 0 0
+  | abs dy >= abs dz = if dy > 0 then V3 0 (-1) 0 else V3 0 1 0
+  | otherwise = if dz > 0 then V3 0 0 (-1) else V3 0 0 1
 
 blockQueryFromChunkMap :: ChunkMap -> V3 Int -> Block
 blockQueryFromChunkMap cm pos =
-  let cc = chunkCoordOf defaultChunkSize (fromIntegral <$> pos)
+  let cc = chunkCoordOf (fromIntegral <$> pos)
    in case M.lookup cc cm of
         Nothing -> Air
         Just h -> blockAtV3 (chData h) pos

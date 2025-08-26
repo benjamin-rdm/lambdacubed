@@ -11,7 +11,6 @@ module Rendering.Camera
 import Linear
 import Data.Maybe (fromMaybe)
 
--- Helper constants
 defaultCameraPosition :: V3 Float
 defaultCameraPosition = V3 1.2 1.2 1.2
 
@@ -24,7 +23,6 @@ defaultCameraUp = V3 0 0 1
 defaultMouseSensitivity :: Double
 defaultMouseSensitivity = 0.1
 
--- Helper functions for common patterns
 calculateDirectionVector :: Direction -> Camera -> V3 Float
 calculateDirectionVector Forward (Camera _ front _ _ _) = front
 calculateDirectionVector Backwards (Camera _ front _ _ _) = -front

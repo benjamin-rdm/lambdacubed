@@ -33,7 +33,8 @@ executable lambdacubed-exe
       Utils.PerlinNoise
       Rendering.Texture
       Game.World
-      Game.ChunkManager
+      Game.WorldManager
+      Game.WorldConfig
       Game.Physics
       Rendering.Shaders
       Game.WorldSource
