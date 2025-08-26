@@ -6,8 +6,8 @@ module Game.WorldSource
 where
 
 import Game.World
-import Linear
 import Game.WorldConfig (worldChunkSize)
+import Linear
 
 type WorldSource = V2 Int -> IO TerrainChunk
 

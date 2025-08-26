@@ -1,8 +1,9 @@
 module Game.WorldConfig
-  ( worldChunkSize
-  ) where
+  ( worldChunkSize,
+  )
+where
 
-import Linear (V3(..))
+import Linear (V3 (..))
 
 worldChunkSize :: V3 Int
 worldChunkSize = V3 64 64 128

@@ -1,14 +1,14 @@
 module Rendering.Shaders
-  ( loadProgramFromFiles
-  , compileShader
-  , linkShaderProgram
-  ) where
+  ( loadProgramFromFiles,
+    compileShader,
+    linkShaderProgram,
+  )
+where
 
-import qualified Data.ByteString.Char8 as BS8
-import qualified Graphics.Rendering.OpenGL.GL as GL
+import Data.ByteString.Char8 qualified as BS8
 import Graphics.Rendering.OpenGL (($=))
+import Graphics.Rendering.OpenGL.GL qualified as GL
 
--- Helper functions for common patterns
 compileShader :: GL.ShaderType -> BS8.ByteString -> IO GL.Shader
 compileShader shaderType source = do
   shader <- GL.createShader shaderType

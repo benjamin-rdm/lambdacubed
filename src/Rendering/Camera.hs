@@ -1,15 +1,16 @@
 module Rendering.Camera
-  ( Camera(..)
-  , defaultCam
-  , setPosAndAngles
-  , applyMousePos
-  , moveCamera
-  , camDirectionVec
-  , Direction(..)
-  ) where
+  ( Camera (..),
+    defaultCam,
+    setPosAndAngles,
+    applyMousePos,
+    moveCamera,
+    camDirectionVec,
+    Direction (..),
+  )
+where
 
-import Linear
 import Data.Maybe (fromMaybe)
+import Linear
 
 defaultCameraPosition :: V3 Float
 defaultCameraPosition = V3 1.2 1.2 1.2
@@ -32,22 +33,25 @@ calculateDirectionVector Up (Camera _ _ up _ _) = up
 calculateDirectionVector Down (Camera _ _ up _ _) = -up
 
 calculateFrontVector :: Float -> Float -> V3 Float
-calculateFrontVector pitch yaw = normalize $ V3
-  (sin yaw * cos pitch)
-  (cos yaw * cos pitch)
-  (sin pitch)
+calculateFrontVector pitch yaw =
+  normalize $
+    V3
+      (sin yaw * cos pitch)
+      (cos yaw * cos pitch)
+      (sin pitch)
 
 clampPitch :: Float -> Float
 clampPitch pitch = max (-89) (min 89 pitch)
 
 wrapYaw :: Float -> Float
-wrapYaw yaw = let yaw' = realToFrac yaw :: Double
-              in realToFrac (((yaw' + 180) - fromIntegral (floor ((yaw' + 180)/360) :: Int) * 360) - 180)
+wrapYaw yaw =
+  let yaw' = realToFrac yaw :: Double
+   in realToFrac (((yaw' + 180) - fromIntegral (floor ((yaw' + 180) / 360) :: Int) * 360) - 180)
 
 calculateMouseDelta :: (Double, Double) -> Maybe (Double, Double) -> (Double, Double)
 calculateMouseDelta (xpos, ypos) prev =
   let (prevX, prevY) = fromMaybe (xpos, ypos) prev
-  in (xpos - prevX, prevY - ypos)  -- Note: Y is inverted
+   in (xpos - prevX, prevY - ypos) -- Note: Y is inverted
 
 degreesToRadians :: Float -> Float
 degreesToRadians = (* (pi / 180))
@@ -55,13 +59,16 @@ degreesToRadians = (* (pi / 180))
 moveCameraByDirection :: Direction -> Float -> Camera -> Camera
 moveCameraByDirection dir dist cam@(Camera pos _ _ pxy ppy) =
   Camera (pos + calculateDirectionVector dir cam ^* dist) front up pxy ppy
-  where (Camera _ front up _ _) = cam
+  where
+    (Camera _ front up _ _) = cam
 
-data Camera = Camera { cameraPos :: V3 Float
-                      ,cameraFront :: V3 Float
-                      ,cameraUp :: V3 Float
-                      ,prevXY :: Maybe (Double, Double)
-                      ,prevPitchYaw :: (Float, Float)}
+data Camera = Camera
+  { cameraPos :: V3 Float,
+    cameraFront :: V3 Float,
+    cameraUp :: V3 Float,
+    prevXY :: Maybe (Double, Double),
+    prevPitchYaw :: (Float, Float)
+  }
 
 data Direction = Forward | Backwards | SidewaysL | SidewaysR | Up | Down
 
@@ -77,18 +84,18 @@ moveCamera = moveCameraByDirection
 applyMousePos :: (Double, Double) -> Camera -> Camera
 applyMousePos (xpos, ypos) (Camera pos _ up prev (prevPitch, prevYaw)) =
   let (deltaX, deltaY) = calculateMouseDelta (xpos, ypos) prev
-      deltaYawDeg     = deltaX * defaultMouseSensitivity
-      deltaPitchDeg   = deltaY * defaultMouseSensitivity
-      pitchDeg'       = clampPitch (prevPitch + realToFrac deltaPitchDeg)
-      yawDeg'         = wrapYaw (prevYaw + realToFrac deltaYawDeg)
-      pitch           = degreesToRadians pitchDeg'
-      yaw             = degreesToRadians yawDeg'
-      newFront        = calculateFrontVector pitch yaw
-  in Camera pos newFront up (Just (xpos, ypos)) (pitchDeg', yawDeg')
+      deltaYawDeg = deltaX * defaultMouseSensitivity
+      deltaPitchDeg = deltaY * defaultMouseSensitivity
+      pitchDeg' = clampPitch (prevPitch + realToFrac deltaPitchDeg)
+      yawDeg' = wrapYaw (prevYaw + realToFrac deltaYawDeg)
+      pitch = degreesToRadians pitchDeg'
+      yaw = degreesToRadians yawDeg'
+      newFront = calculateFrontVector pitch yaw
+   in Camera pos newFront up (Just (xpos, ypos)) (pitchDeg', yawDeg')
 
 setPosAndAngles :: V3 Float -> (Float, Float) -> Camera -> Camera
 setPosAndAngles p (pitchDeg, yawDeg) (Camera _ _ up oldPrev _) =
-  let pitch     = degreesToRadians pitchDeg
-      yaw       = degreesToRadians yawDeg
-      newFront  = calculateFrontVector pitch yaw
-  in Camera p newFront up oldPrev (pitchDeg, yawDeg)
+  let pitch = degreesToRadians pitchDeg
+      yaw = degreesToRadians yawDeg
+      newFront = calculateFrontVector pitch yaw
+   in Camera p newFront up oldPrev (pitchDeg, yawDeg)

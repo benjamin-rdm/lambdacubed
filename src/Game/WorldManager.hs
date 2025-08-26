@@ -23,10 +23,11 @@ module Game.WorldManager
     evalChunkManager,
     raycastBlockData,
     buildChunkAtIO,
-    blockQueryFromChunkMap
+    blockQueryFromChunkMap,
   )
 where
 
+import App.Config qualified as C
 import Control.Monad (unless)
 import Control.Monad.Reader
 import Control.Monad.State
@@ -36,7 +37,6 @@ import Data.Vector.Storable ()
 import Game.World
 import Game.WorldSource
 import Linear hiding (nearZero)
-import qualified App.Config as C
 
 calculateDistance :: V2 Int -> V2 Int -> Float
 calculateDistance a b = sqrt $ fromIntegral $ quadrance (a - b)
@@ -81,7 +81,7 @@ defaultChunkManagerConfig =
   ChunkManagerConfig
     { cmcRenderDistance = C.renderDistance,
       cmcMaxChunksPerFrame = 1,
-      -- 
+      --
       -- Reduce the amount of chunks loaded by frame reduce CPU-limited frame times during world generation
       cmcWorldSource = generatedTerrian
     }
