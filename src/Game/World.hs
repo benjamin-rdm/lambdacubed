@@ -295,9 +295,9 @@ face v1 v2 v3 v4 layer =
    in tri v1 (0, 0) v2 (1, 0) v3 (1, 1)
         ++ tri v1 (0, 0) v3 (1, 1) v4 (0, 1)
 
-faceCorners :: V3 Int -> TextureDirection -> (V3 Float, V3 Float, V3 Float, V3 Float)
+faceCorners :: Real a => V3 a -> TextureDirection -> (V3 Float, V3 Float, V3 Float, V3 Float)
 faceCorners (V3 x y z) dir =
-  let f a b c = fromIntegral <$> V3 a b c
+  let f a b c = realToFrac <$> V3 a b c
       p000 = f x y z
       p100 = f (x + 1) y z
       p110 = f (x + 1) (y + 1) z
@@ -336,6 +336,10 @@ buildTerrainVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
         lx <- [0 .. sx - 1]
     ]
 
+-- Render water slightly below the surface of the block
+waterLevelOffset :: Float
+waterLevelOffset = 0.1
+
 buildWaterVertices :: TerrainChunk -> [Float]
 buildWaterVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
   concat
@@ -343,8 +347,9 @@ buildWaterVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
        in case blockAtV3 chunk worldPosI of
             Water ->
               concat
-                [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
-                      (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
+                [ let offsetWorldPos = (fromIntegral <$> worldPosI) - V3 0 0 waterLevelOffset
+                      (v1, v2, v3, v4) = faceCorners offsetWorldPos dir
+                      (v5, v6, v7, v8) = faceCorners offsetWorldPos (invertTextureDirection dir)
                       -- Render water from below the surface
                       layer = textureLayerOf Water dir
                    in face v1 v2 v3 v4 layer ++ face v5 v6 v7 v8 layer
