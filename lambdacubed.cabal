@@ -31,6 +31,7 @@ executable lambdacubed-exe
       Rendering.Camera
       Utils.Math
       Utils.PerlinNoise
+      Utils.Monad
       Rendering.Texture
       Game.World
       Game.WorldManager

@@ -10,6 +10,7 @@ module Game.World
     genTerrainChunkAtCoord,
     buildTerrainVertices,
     buildWaterVertices,
+    buildLeavesVertices,
     TerrainChunk (..),
     ChunkMesh (..),
     uploadChunk,
@@ -20,7 +21,10 @@ module Game.World
 where
 
 import Control.Monad.Reader
+import Control.Monad.State (State, execState, modify)
 import Data.Foldable
+import Data.IntMap.Strict qualified as IM
+import Data.Maybe
 import Data.Vector.Storable qualified as VS
 import Data.Word (Word8)
 import Foreign.Marshal.Array (withArray)
@@ -31,18 +35,27 @@ import Game.WorldConfig (worldChunkSize)
 import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Linear
+import Utils.Monad
 import Utils.PerlinNoise (perlin2)
 
-calculateNoise :: Float -> Float -> Float -> Float -> Float -> Float
-calculateNoise x y baseFreq scaleX scaleY =
-  let nx = fromIntegral (floor x) * baseFreq * scaleX
-      ny = fromIntegral (floor y) * baseFreq * scaleY
-      n = perlin2 nx ny
-      n01 = 2.0 * (n + 1.0)
-   in n01
+-- TODO: Make non-monadic
+sample01ExplicitM :: Float -> Float -> Float -> (Float, Float) -> WorldGen Float
+sample01ExplicitM baseFreq scaleX scaleY (x, y) = do
+  let nx = x * baseFreq * scaleX
+      ny = y * baseFreq * scaleY
+  pure $ clamp01 (0.5 * (perlin2 nx ny + 1.0))
+
+sample01AtFreqM :: Float -> (Float, Float) -> WorldGen Float
+sample01AtFreqM f (x, y) = do
+  sx <- scaleXM
+  sy <- scaleYM
+  sample01ExplicitM f sx sy (x, y)
 
 clamp :: (Ord a) => a -> a -> a -> a
 clamp val minVal maxVal = max minVal (min maxVal val)
+
+clamp01 :: Float -> Float
+clamp01 x = clamp x 0.0 1.0
 
 isWithinChunkBounds :: V3 Int -> V3 Int -> Bool
 isWithinChunkBounds (V3 lx ly lz) (V3 sx sy sz) =
@@ -70,10 +83,33 @@ data WorldGenConfig = WorldGenConfig
   { wgNoiseFreq :: !Float,
     wgScaleX :: !Float,
     wgScaleY :: !Float,
+    wgBaseHeight :: !Int,
+    wgHeightAmplitude :: !Int,
     wgWaterLevel :: !Int,
     wgTreeDensity :: !Float
   }
   deriving (Eq, Show)
+
+noiseFreqM :: WorldGen Float
+noiseFreqM = asks wgNoiseFreq
+
+scaleXM :: WorldGen Float
+scaleXM = asks wgScaleX
+
+scaleYM :: WorldGen Float
+scaleYM = asks wgScaleY
+
+baseHeightM :: WorldGen Int
+baseHeightM = asks wgBaseHeight
+
+heightAmplitudeM :: WorldGen Int
+heightAmplitudeM = asks wgHeightAmplitude
+
+waterLevelM :: WorldGen Int
+waterLevelM = asks wgWaterLevel
+
+treeDensityM :: WorldGen Float
+treeDensityM = asks wgTreeDensity
 
 defaultWorldGenConfig :: WorldGenConfig
 defaultWorldGenConfig =
@@ -81,10 +117,10 @@ defaultWorldGenConfig =
     { wgNoiseFreq = 0.01,
       wgScaleX = 0.8,
       wgScaleY = 1.3,
-      wgWaterLevel = 30,
-      wgTreeDensity = 0.0 -- Tree generation does not work currently.
-      -- I also still need to consider how to render
-      -- leaves and other semi-transparent blocks
+      wgBaseHeight = 20,
+      wgHeightAmplitude = 50,
+      wgWaterLevel = 35,
+      wgTreeDensity = 0.5
     }
 
 data TerrainChunk = TerrainChunk
@@ -95,11 +131,17 @@ data TerrainChunk = TerrainChunk
 
 type WorldGen = Reader WorldGenConfig
 
--- Generate a chunk at a given world-space origin using the fixed worldChunkSize
+type WorldPos = V3 Int
+
+treeHeightDefault :: Int
+treeHeightDefault = 7
+
+leafRadiusDefault :: Int
+leafRadiusDefault = 3
+
 genTerrainChunk :: V3 Int -> TerrainChunk
 genTerrainChunk origin = runReader (genTerrainChunkM origin) defaultWorldGenConfig
 
--- Generate a TerrainChunk given a 2D chunk coordinate using the fixed worldChunkSize
 genTerrainChunkAtCoord :: V2 Int -> TerrainChunk
 genTerrainChunkAtCoord (V2 cx cy) =
   let V3 sx sy _ = worldChunkSize
@@ -108,106 +150,147 @@ genTerrainChunkAtCoord (V2 cx cy) =
 
 genTerrainChunkM :: V3 Int -> WorldGen TerrainChunk
 genTerrainChunkM org@(V3 ox oy _oz) = do
-  config <- ask
   let V3 sx sy sz = worldChunkSize
-  let !totalSize = sx * sy * sz
+      !totalSize = sx * sy * sz
       !xySize = sx * sy
 
-      height !x !y =
-        let !baseFreq = wgNoiseFreq config
-            !scaleX = wgScaleX config
-            !scaleY = wgScaleY config
-            !n01 = calculateNoise (fromIntegral (ox + x)) (fromIntegral (oy + y)) baseFreq scaleX scaleY
-         in clamp (20 + floor (10.0 * n01)) 0 sz
+  -- Precompute heights once per (x,y) to avoid recomputing for each z
+  heightsList <-
+    mapM
+      ( \i ->
+          let (!y, !x) = i `divMod` sx
+           in heightAtWorldM (ox + x) (oy + y)
+      )
+      [0 .. xySize - 1]
+  let !heights = VS.fromList heightsList
 
-      getBlock !i =
-        let !waterLevelZ = wgWaterLevel config
-            (!z, !r1) = i `divMod` xySize
+  waterLevelZ <- waterLevelM
+
+  let classify :: Int -> Int -> Int -> Block
+      classify z h wL =
+        case compare z (h - 1) of
+          GT -> if z <= wL then Water else Air
+          EQ -> Grass
+          LT -> if z >= h - 4 then Dirt else Stone
+
+      blockAtIndex !i =
+        let (!z, !r1) = i `divMod` xySize
             (!y, !x) = r1 `divMod` sx
-            !h = height x y
-         in if z > h - 1
-              then if z <= waterLevelZ then Water else Air
-              else
-                if z == h - 1
-                  then Grass
-                  else
-                    if z >= h - 4
-                      then Dirt
-                      else Stone
+            !h = heights VS.! (y * sx + x)
+         in classify z h waterLevelZ
 
-      !baseBlocks = VS.generate totalSize getBlock
+      !baseBlocks = VS.generate totalSize blockAtIndex
       !baseChunk = TerrainChunk org worldChunkSize baseBlocks
   generateTreesM baseChunk
 
 generateTreesM :: TerrainChunk -> WorldGen TerrainChunk
 generateTreesM chunk@(TerrainChunk org siz blocks) = do
-  config <- ask
-  let !treePositions = findTreePositionsM chunk config
-      !newBlocks = foldl' (placeTree chunk) blocks treePositions
-  return $ TerrainChunk org siz newBlocks
+  positions <- findTreePositionsM chunk
+  let im = execState (mapM_ (treeBuilder chunk) positions) IM.empty
+      newBlocks = blocks VS.// IM.toList im
+  pure $ TerrainChunk org siz newBlocks
 
-findTreePositionsM :: TerrainChunk -> WorldGenConfig -> [V3 Int]
-findTreePositionsM chunk@(TerrainChunk (V3 ox oy oz) (V3 sx sy sz) _) config =
-  [ V3 (ox + x) (oy + y) (oz + surfaceZ + 1)
-    | x <- [10, 20, 30, 40, 50], -- This is just for testing and should be reworked to use a noise-based function
-      y <- [10, 20, 30, 40, 50],
-      x < sx - 3 && y < sy - 3,
-      let surfaceZ = findSurfaceAt chunk x y,
-      surfaceZ > 1 && surfaceZ < sz - 10,
-      shouldPlaceTreeM (ox + x) (oy + y) config
+type ChunkBuilder = State (IM.IntMap Block)
+
+treeBuilder :: TerrainChunk -> WorldPos -> ChunkBuilder ()
+treeBuilder chunk base@(V3 _ _ tz) = do
+  let trunk = buildTrunk treeHeightDefault base
+      leaves = buildLeafSphere leafRadiusDefault (tz + treeHeightDefault) base
+  mapM_ (addBlock chunk OakLog) trunk
+  mapM_ (addBlock chunk OakLeaves) leaves
+
+buildTrunk :: Int -> WorldPos -> [WorldPos]
+buildTrunk h (V3 x y z0) = [V3 x y (z0 + dz) | dz <- [0 .. h - 1]]
+
+canopyOffsets :: Int -> [WorldPos]
+canopyOffsets r =
+  [ V3 dx dy dz
+    | dx <- [-r .. r],
+      dy <- [-r .. r],
+      dz <- [-r .. r],
+      let d2 = dx * dx + dy * dy + dz * dz,
+      d2 <= r * r,
+      not (dx == 0 && dy == 0 && dz <= 0)
   ]
 
-findSurfaceAt :: TerrainChunk -> Int -> Int -> Int
-findSurfaceAt chunk@(TerrainChunk (V3 ox oy oz) (V3 _ _ sz) _) !x !y =
-  let searchDown !z
-        | z < 0 = 0
-        | otherwise =
-            let !block = blockAt chunk (ox + x) (oy + y) (oz + z)
-             in case block of
-                  Grass -> z + 1
-                  Dirt -> z + 1
-                  _ -> searchDown (z - 1)
-   in searchDown (sz - 1)
+-- This is not quite the same shape as Minecraft, the logic could be adjusted here
+buildLeafSphere :: Int -> Int -> WorldPos -> [WorldPos]
+buildLeafSphere r topZ (V3 x y _) = [V3 (x + dx) (y + dy) (topZ + dz) | V3 dx dy dz <- canopyOffsets r]
 
-shouldPlaceTreeM :: Int -> Int -> WorldGenConfig -> Bool
-shouldPlaceTreeM !x !y config =
-  let !density = wgTreeDensity config
-      !seed = fromIntegral (x * 374761393 + y * 668265263)
-      !noise = perlin2 (seed * 0.08) 0
-   in noise > (1.0 - density)
+treeSpacingStep :: Int
+treeSpacingStep = 5
 
-placeTree :: TerrainChunk -> VS.Vector Block -> V3 Int -> VS.Vector Block
-placeTree chunk@(TerrainChunk _ chunkSize _) blocks (V3 tx ty tz) =
-  let !treeHeight = 7
-      !leafRadius = 3
-      !xySize = let V3 sx sy _ = chunkSize in sx * sy
+alignedRange :: Int -> Int -> Int -> [Int]
+alignedRange from to step =
+  let r = (from `mod` step + step) `mod` step
+      first = if r == 0 then from else from + (step - r)
+   in [first, first + step .. to]
 
-      !trunkBlocks = [V3 tx ty (tz + h) | h <- [0 .. treeHeight - 1]]
-      !leafBlocks =
-        [ V3 (tx + dx) (ty + dy) (tz + treeHeight + dz)
-          | dx <- [-leafRadius .. leafRadius],
-            dy <- [-leafRadius .. leafRadius],
-            let !distSq = dx * dx + dy * dy,
-            distSq <= leafRadius * leafRadius,
-            dz <- [-1 .. 1],
-            not (dx == 0 && dy == 0 && dz <= 0)
-        ]
+chunkBoundsWithMargin :: TerrainChunk -> Int -> (Int, Int, Int, Int)
+chunkBoundsWithMargin (TerrainChunk (V3 ox oy _oz) (V3 sx sy _sz) _) margin =
+  let fromX = ox - margin
+      toX = ox + sx - 1 + margin
+      fromY = oy - margin
+      toY = oy + sy - 1 + margin
+   in (fromX, toX, fromY, toY)
 
-      !trunkUpdates =
-        [ (idx, OakLog)
-          | pos <- trunkBlocks,
-            Just idx <- [positionToIndex pos chunkSize xySize]
-        ]
+findTreePositionsM :: TerrainChunk -> WorldGen [V3 Int]
+findTreePositionsM chunk@(TerrainChunk (V3 _ox _oy oz) (V3 _sx _sy sz) _) = do
+  let margin = leafRadiusDefault + 1
+      (fromX, toX, fromY, toY) = chunkBoundsWithMargin chunk margin
+      xs = alignedRange fromX toX treeSpacingStep
+      ys = alignedRange fromY toY treeSpacingStep
+  candidates <-
+    mapM
+      ( \(wx, wy) -> do
+          h <- heightAtWorldM wx wy
+          ok <- shouldPlaceTreeM wx wy
+          wl <- waterLevelM
+          let okZ = h > 1 && h < sz - 12 && h > wl + 1
+          pure $ if ok && okZ then Just (V3 wx wy (oz + h)) else Nothing
+      )
+      [(x, y) | x <- xs, y <- ys]
+  pure (catMaybes candidates)
 
-      !leafUpdates =
-        [ (idx, OakLeaves)
-          | pos <- leafBlocks,
-            blockAtV3 chunk pos == Air,
-            Just idx <- [positionToIndex pos chunkSize xySize]
-        ]
+shouldPlaceTreeM :: Int -> Int -> WorldGen Bool
+shouldPlaceTreeM !x !y = do
+  d <- treeDensityM
+  let density = clamp d 0.0 1.0
+      wx = fromIntegral x
+      wy = fromIntegral y
+  f <- noiseFreqM
+  forest <- sample01AtFreqM (max 1e-3 (f * 0.5)) (wx, wy)
+  key <- sample01ExplicitM 0.015 1 1 (wx * 5, wy * 5)
+  let p = density * forest
+  pure (key > (1.0 - p))
 
-      !allUpdates = trunkUpdates ++ leafUpdates
-   in blocks VS.// allUpdates
+addBlock :: TerrainChunk -> Block -> V3 Int -> ChunkBuilder ()
+addBlock (TerrainChunk origin chunkSize _) b posWorld =
+  whenJust (localIndex origin chunkSize posWorld) $ \idx -> modify (IM.insertWith combine idx b)
+  where
+    combine new old = case (old, new) of
+      -- We do not want leaves of one tree to overwrite logs of another tree
+      (OakLog, _) -> old
+      (_, OakLog) -> new
+      _ -> new
+
+localIndex :: V3 Int -> V3 Int -> V3 Int -> Maybe Int
+localIndex origin chunkSize posWorld =
+  let V3 sx sy _ = chunkSize
+      xySize = sx * sy
+   in positionToIndex (posWorld - origin) chunkSize xySize
+
+heightAtWorldM :: Int -> Int -> WorldGen Int
+heightAtWorldM wx wy = do
+  let V3 _ _ sz = worldChunkSize
+      pos = (fromIntegral wx, fromIntegral wy)
+  f <- noiseFreqM
+  h1 <- sample01AtFreqM f pos
+  h2 <- sample01AtFreqM (f * 2.1) pos
+  base <- baseHeightM
+  amp <- heightAmplitudeM
+  let h = 0.7 * h1 + 0.3 * h2
+  pure $ clamp (base + floor (fromIntegral amp * h)) 0 sz
 
 blockAt :: TerrainChunk -> Int -> Int -> Int -> Block
 blockAt (TerrainChunk origin chunkSize bm) !x !y !z =
@@ -295,7 +378,7 @@ face v1 v2 v3 v4 layer =
    in tri v1 (0, 0) v2 (1, 0) v3 (1, 1)
         ++ tri v1 (0, 0) v3 (1, 1) v4 (0, 1)
 
-faceCorners :: Real a => V3 a -> TextureDirection -> (V3 Float, V3 Float, V3 Float, V3 Float)
+faceCorners :: (Real a) => V3 a -> TextureDirection -> (V3 Float, V3 Float, V3 Float, V3 Float)
 faceCorners (V3 x y z) dir =
   let f a b c = realToFrac <$> V3 a b c
       p000 = f x y z
@@ -356,6 +439,28 @@ buildWaterVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
                   | dir <- [PosZ], -- Do not render side vertices for water
                     let neighborPos = worldPosI + dirOffset dir,
                     blockAtV3 chunk neighborPos == Air
+                ]
+            _ -> []
+      | lz <- [0 .. sz - 1],
+        ly <- [0 .. sy - 1],
+        lx <- [0 .. sx - 1]
+    ]
+
+buildLeavesVertices :: TerrainChunk -> [Float]
+buildLeavesVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
+  concat
+    [ let worldPosI = chunkOrigin + V3 lx ly lz
+       in case blockAtV3 chunk worldPosI of
+            OakLeaves ->
+              -- Render all leaf faces regardless of neighbors
+              -- This creates a more dense apperance of the leaves.
+              -- Also render them from both sides
+              concat
+                [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
+                      (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
+                      layer = textureLayerOf OakLeaves dir
+                   in face v1 v2 v3 v4 layer ++ face v5 v6 v7 v8 layer
+                  | dir <- [NegX, PosX, NegY, PosY, NegZ, PosZ]
                 ]
             _ -> []
       | lz <- [0 .. sz - 1],

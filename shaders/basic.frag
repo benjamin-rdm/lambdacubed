@@ -2,6 +2,7 @@
 in vec3 vTC;
 in float vFogDist;
 uniform sampler2DArray uAtlas;
+uniform float uAlphaCutoff;
 uniform vec3 uFogColor;
 uniform float uFogStart;
 uniform float uFogEnd;
@@ -19,8 +20,8 @@ void main(){
   }
   
   vec4 base = texture(uAtlas, texCoord);
+  if (base.a < uAlphaCutoff) discard;
   float fog = clamp((vFogDist - uFogStart) / (uFogEnd - uFogStart), 0.0, 1.0);
   vec3 rgb = mix(base.rgb, uFogColor, fog);
   FragColor = vec4(rgb, base.a);
 }
-

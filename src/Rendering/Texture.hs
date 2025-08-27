@@ -21,7 +21,7 @@ defaultBlockTexturePaths =
     "resource_pack/assets/minecraft/textures/block/water_still_blue.png",
     "resource_pack/assets/minecraft/textures/block/oak_log_top.png",
     "resource_pack/assets/minecraft/textures/block/oak_log.png",
-    "resource_pack/assets/minecraft/textures/block/oak_leaves.png"
+    "resource_pack/assets/minecraft/textures/block/oak_leaves_green.png"
   ]
 
 convertImageToRGBA :: DynamicImage -> Image PixelRGBA8

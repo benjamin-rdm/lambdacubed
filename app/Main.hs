@@ -255,20 +255,22 @@ setupOpenGL win aspectRef = do
   GL.frontFace $= GL.CCW
   GL.cullFace $= Just GL.Back
 
-setupTerrainShader :: IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
+setupTerrainShader :: IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
 setupTerrainShader = do
-  (terrainProg, [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas]) <-
+  (terrainProg, [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff]) <-
     setupShaderWithUniforms
       "shaders/basic.vert"
       "shaders/basic.frag"
-      ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas"]
+      ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas", "uAlphaCutoff"]
 
   atlas <- createBlockTextureArray
   GL.activeTexture $= GL.TextureUnit 0
   GL.textureBinding GL.Texture2DArray $= Just atlas
   GL.uniform uAtlas $= GL.TextureUnit 0
 
-  pure (terrainProg, (uView, uProj, uFogColor, uFogStart, uFogEnd, uAtlas, uTime))
+  -- Default: no alpha cutoff (opaque & water)
+  GL.uniform uAlphaCutoff $= (0.0 :: GL.GLfloat)
+  pure (terrainProg, (uView, uProj, uFogColor, uFogStart, uFogEnd, uAtlas, uTime, uAlphaCutoff))
 
 setupSkyShader :: IO (GL.Program, GL.VertexArrayObject, GL.BufferObject)
 setupSkyShader = do
@@ -442,7 +444,7 @@ main = do
   (uiProg, uiTex, uiVAO, uiVBO, uUiTex, uUiAspect) <- setupUIShader
   GL.currentProgram $= Just terrainProg
 
-  let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime) = uniforms
+  let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime, _) = uniforms
   cmRef <- initializeGameState C.fogStart C.fogEnd C.fogColor uFogStart uFogEnd uFogColor
   (camRef, playerRef, clickStateRef, timeRef, fpsRef, outlineEnabledRef, keyPrevRef) <- initializePlayerAndCamera win
 
@@ -503,6 +505,7 @@ main = do
         liftIO $ writeIORef envCMRef cmState1
         let chunksDraw = cmsLoadedChunks cmState1
         liftIO $ drawWorldOpaque chunksDraw
+        liftIO $ drawWorldLeaves chunksDraw
         liftIO $ drawWorldWater chunksDraw
         Env {envOutlineRef} <- askEnv
         outlineEnabled <- liftIO $ readIORef envOutlineRef
@@ -543,10 +546,39 @@ drawWorldWater chunks = do
   GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
   mapM_
     ( \h -> do
-        GL.bindVertexArrayObject $= Just (cmVAO (chWater h))
-        GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chWater h)))
+      GL.bindVertexArrayObject $= Just (cmVAO (chWater h))
+      GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chWater h)))
     )
     (M.elems chunks)
+  GL.blend $= GL.Disabled
+
+drawWorldLeaves :: ChunkMap -> IO ()
+drawWorldLeaves chunks = do
+  -- Alpha cutoff needs to be set here for transparent textures like leaves draw
+  -- while still showing transparent textures in the same mesh behind them
+  -- Still do not quite understand the entire logic, but my OpenGL knowledge 
+  -- mostly comes from ChatGPT, so that might explain
+  GL.blend $= GL.Disabled
+  GL.cullFace $= Nothing
+  mprog1 <- GL.get GL.currentProgram
+  case mprog1 of
+    Just prog -> do
+      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
+      GL.uniform u $= (0.5 :: GL.GLfloat)
+    Nothing -> pure ()
+  mapM_
+    ( \h -> do
+        GL.bindVertexArrayObject $= Just (cmVAO (chLeaves h))
+        GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chLeaves h)))
+    )
+    (M.elems chunks)
+  mprog2 <- GL.get GL.currentProgram
+  case mprog2 of
+    Just prog -> do
+      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
+      GL.uniform u $= (0.0 :: GL.GLfloat)
+    Nothing -> pure ()
+  GL.cullFace $= Just GL.Back
   GL.blend $= GL.Disabled
 
 drawCrosshairUIM :: AppM ()
@@ -653,15 +685,19 @@ drawBlockOutlineM = do
 
 updateFpsTitleM :: AppM ()
 updateFpsTitleM = do
-  Env {envWin, envFpsRef} <- askEnv
+  Env {envWin, envFpsRef, envPlayerRef} <- askEnv
   tNow <- liftIO getCurrentTime
   (fc, tStart) <- liftIO $ readIORef envFpsRef
-  let fc' = fc + 1
+  player <- liftIO $ readIORef envPlayerRef
+  let Player (V3 px py pz) _ = player
+      V3 ix iy iz = floor <$> V3 px py pz :: V3 Int
+      fc' = fc + 1
       elapsed = realToFrac (tNow - tStart) :: Float
+      posStr = "(" ++ show ix ++ ", " ++ show iy ++ ", " ++ show iz ++ ")"
   if elapsed >= 0.5 && tStart > 0
     then liftIO $ do
       let fps = fromIntegral fc' / elapsed
-      GLFW.setWindowTitle envWin ("lambdacubed - " ++ show (round fps :: Int) ++ " FPS")
+      GLFW.setWindowTitle envWin ("lambdacubed - " ++ posStr ++ " - " ++ show (round fps :: Int) ++ " FPS")
       writeIORef envFpsRef (0, tNow)
     else liftIO $ writeIORef envFpsRef (fc', tStart)
 

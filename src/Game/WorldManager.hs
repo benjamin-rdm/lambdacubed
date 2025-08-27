@@ -31,7 +31,7 @@ import App.Config qualified as C
 import Control.Monad (unless)
 import Control.Monad.Reader
 import Control.Monad.State
-import Data.List (sortOn)
+import Utils.Monad
 import Data.Map.Strict qualified as M
 import Data.Vector.Storable ()
 import Game.World
@@ -56,7 +56,8 @@ data ChunkHandle = ChunkHandle
     chOrigin :: !(V3 Int),
     chData :: !TerrainChunk,
     chOpaque :: !ChunkMesh,
-    chWater :: !ChunkMesh
+    chWater :: !ChunkMesh,
+    chLeaves :: !ChunkMesh
   }
 
 type ChunkCoord = V2 Int
@@ -81,7 +82,6 @@ defaultChunkManagerConfig =
   ChunkManagerConfig
     { cmcRenderDistance = C.renderDistance,
       cmcMaxChunksPerFrame = 1,
-      --
       -- Reduce the amount of chunks loaded by frame reduce CPU-limited frame times during world generation
       cmcWorldSource = generatedTerrian
     }
@@ -121,11 +121,14 @@ setBlockAtWorld pos newBlock = do
           -- Rebuild meshes for this chunk
           let verts = buildTerrainVertices newChunk
               wverts = buildWaterVertices newChunk
+              lverts = buildLeavesVertices newChunk
           liftIO $ deleteChunkMesh (chOpaque h)
           liftIO $ deleteChunkMesh (chWater h)
+          liftIO $ deleteChunkMesh (chLeaves h)
           newOpaque <- liftIO $ uploadChunk verts
           newWater <- liftIO $ uploadChunk wverts
-          let updatedHandle = h {chData = newChunk, chOpaque = newOpaque, chWater = newWater}
+          newLeaves <- liftIO $ uploadChunk lverts
+          let updatedHandle = h {chData = newChunk, chOpaque = newOpaque, chWater = newWater, chLeaves = newLeaves}
               updatedChunks = M.insert cc updatedHandle chunks
           modify $ \s -> s {cmsLoadedChunks = updatedChunks}
           pure True
@@ -137,9 +140,11 @@ buildChunkAt coord = do
   let origin = chunkWorldOrigin coord
       verts = buildTerrainVertices terrainChunk
       wverts = buildWaterVertices terrainChunk
+      lverts = buildLeavesVertices terrainChunk
   opaqueMesh <- liftIO $ uploadChunk verts
   waterMesh <- liftIO $ uploadChunk wverts
-  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh
+  leavesMesh <- liftIO $ uploadChunk lverts
+  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh leavesMesh
 
 buildChunkAtIO :: WorldSource -> V2 Int -> IO ChunkHandle
 buildChunkAtIO ws coord = do
@@ -147,9 +152,11 @@ buildChunkAtIO ws coord = do
   terrainChunk <- ws coord
   let verts = buildTerrainVertices terrainChunk
       wverts = buildWaterVertices terrainChunk
+      lverts = buildLeavesVertices terrainChunk
   opaqueMesh <- uploadChunk verts
   waterMesh <- uploadChunk wverts
-  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh
+  leavesMesh <- uploadChunk lverts
+  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh leavesMesh
 
 loadChunk :: V2 Int -> ChunkManager ()
 loadChunk coord = do
@@ -159,9 +166,10 @@ loadChunk coord = do
     modify $ \s -> s {cmsLoadedChunks = M.insert coord handle (cmsLoadedChunks s)}
 
 unloadChunkHandle :: ChunkHandle -> ChunkManager ()
-unloadChunkHandle (ChunkHandle coord _ _ om wm) = do
+unloadChunkHandle (ChunkHandle coord _ _ om wm lm) = do
   liftIO $ deleteChunkMesh om
   liftIO $ deleteChunkMesh wm
+  liftIO $ deleteChunkMesh lm
   modify $ \s -> s {cmsLoadedChunks = M.delete coord (cmsLoadedChunks s)}
 
 updatePlayerPosition :: V3 Float -> ChunkManager ()
@@ -176,9 +184,7 @@ getDesiredChunks = do
   pure [V2 (cx + dx) (cy + dy) | dx <- [-renderDistance .. renderDistance], dy <- [-renderDistance .. renderDistance]]
 
 prioritizeChunks :: [V2 Int] -> ChunkManager [V2 Int]
-prioritizeChunks coords = do
-  distances <- mapM (\coord -> (,) coord <$> distanceToPlayer coord) coords
-  pure $ map fst $ sortOn snd distances
+prioritizeChunks = sortOnM distanceToPlayer
 
 updateChunks :: ChunkManager ()
 updateChunks = do
