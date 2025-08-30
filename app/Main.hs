@@ -255,22 +255,40 @@ setupOpenGL win aspectRef = do
   GL.frontFace $= GL.CCW
   GL.cullFace $= Just GL.Back
 
-setupTerrainShader :: IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
+setupTerrainShader :: IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
 setupTerrainShader = do
-  (terrainProg, [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff]) <-
+  (terrainProg, [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff, uGrassColormap, uFoliageColormap]) <-
     setupShaderWithUniforms
       "shaders/basic.vert"
       "shaders/basic.frag"
-      ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas", "uAlphaCutoff"]
+      ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas", "uAlphaCutoff", "uGrassColormap", "uFoliageColormap"]
 
   atlas <- createBlockTextureArray
   GL.activeTexture $= GL.TextureUnit 0
   GL.textureBinding GL.Texture2DArray $= Just atlas
   GL.uniform uAtlas $= GL.TextureUnit 0
 
-  -- Default: no alpha cutoff (opaque & water)
+  grassCM <- GL.genObjectName
+  GL.activeTexture $= GL.TextureUnit 2
+  GL.texture GL.Texture2D $= GL.Enabled
+  GL.textureBinding GL.Texture2D $= Just grassCM
+  setupTextureMode GL.Texture2D
+  loadTextureFromPng "resource_pack/assets/minecraft/textures/colormap/grass.png"
+  GL.generateMipmap GL.Texture2D $= GL.Enabled
+  GL.uniform uGrassColormap $= GL.TextureUnit 2
+
+  foliageCM <- GL.genObjectName
+  GL.activeTexture $= GL.TextureUnit 3
+  GL.texture GL.Texture2D $= GL.Enabled
+  GL.textureBinding GL.Texture2D $= Just foliageCM
+  setupTextureMode GL.Texture2D
+  loadTextureFromPng "resource_pack/assets/minecraft/textures/colormap/foliage.png"
+  GL.generateMipmap GL.Texture2D $= GL.Enabled
+  GL.uniform uFoliageColormap $= GL.TextureUnit 3
+
+  -- We set alpha cutoff to 0.0 as the default behavior
   GL.uniform uAlphaCutoff $= (0.0 :: GL.GLfloat)
-  pure (terrainProg, (uView, uProj, uFogColor, uFogStart, uFogEnd, uAtlas, uTime, uAlphaCutoff))
+  pure (terrainProg, (uView, uProj, uFogColor, uFogStart, uFogEnd, uAtlas, uTime, uAlphaCutoff, uGrassColormap, uFoliageColormap))
 
 setupSkyShader :: IO (GL.Program, GL.VertexArrayObject, GL.BufferObject)
 setupSkyShader = do
@@ -444,7 +462,7 @@ main = do
   (uiProg, uiTex, uiVAO, uiVBO, uUiTex, uUiAspect) <- setupUIShader
   GL.currentProgram $= Just terrainProg
 
-  let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime, _) = uniforms
+  let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime, _, _, _) = uniforms
   cmRef <- initializeGameState C.fogStart C.fogEnd C.fogColor uFogStart uFogEnd uFogColor
   (camRef, playerRef, clickStateRef, timeRef, fpsRef, outlineEnabledRef, keyPrevRef) <- initializePlayerAndCamera win
 
@@ -505,6 +523,7 @@ main = do
         liftIO $ writeIORef envCMRef cmState1
         let chunksDraw = cmsLoadedChunks cmState1
         liftIO $ drawWorldOpaque chunksDraw
+        liftIO $ drawWorldGrassOverlay chunksDraw
         liftIO $ drawWorldLeaves chunksDraw
         liftIO $ drawWorldWater chunksDraw
         Env {envOutlineRef} <- askEnv
@@ -580,6 +599,28 @@ drawWorldLeaves chunks = do
     Nothing -> pure ()
   GL.cullFace $= Just GL.Back
   GL.blend $= GL.Disabled
+
+drawWorldGrassOverlay :: ChunkMap -> IO ()
+drawWorldGrassOverlay chunks = do
+  GL.blend $= GL.Disabled
+  mprog1 <- GL.get GL.currentProgram
+  case mprog1 of
+    Just prog -> do
+      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
+      GL.uniform u $= (0.5 :: GL.GLfloat)
+    Nothing -> pure ()
+  mapM_
+    ( \h -> do
+        GL.bindVertexArrayObject $= Just (cmVAO (chGrassOverlay h))
+        GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chGrassOverlay h)))
+    )
+    (M.elems chunks)
+  mprog2 <- GL.get GL.currentProgram
+  case mprog2 of
+    Just prog -> do
+      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
+      GL.uniform u $= (0.0 :: GL.GLfloat)
+    Nothing -> pure ()
 
 drawCrosshairUIM :: AppM ()
 drawCrosshairUIM = do

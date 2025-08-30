@@ -13,15 +13,15 @@ import Graphics.Rendering.OpenGL.GL qualified as GL
 
 defaultBlockTexturePaths :: [FilePath]
 defaultBlockTexturePaths =
-  [ "resource_pack/assets/minecraft/textures/block/grass_block_top_green.png",
+  [ "resource_pack/assets/minecraft/textures/block/grass_block_top.png",
     "resource_pack/assets/minecraft/textures/block/gravel.png",
     "resource_pack/assets/minecraft/textures/block/stone.png",
     "resource_pack/assets/minecraft/textures/block/dirt.png",
-    "resource_pack/assets/minecraft/textures/block/grass_block_side.png",
+    "resource_pack/assets/minecraft/textures/block/grass_block_side_overlay.png",
     "resource_pack/assets/minecraft/textures/block/water_still_blue.png",
     "resource_pack/assets/minecraft/textures/block/oak_log_top.png",
     "resource_pack/assets/minecraft/textures/block/oak_log.png",
-    "resource_pack/assets/minecraft/textures/block/oak_leaves_green.png"
+    "resource_pack/assets/minecraft/textures/block/oak_leaves.png"
   ]
 
 convertImageToRGBA :: DynamicImage -> Image PixelRGBA8

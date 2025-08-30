@@ -11,6 +11,7 @@ module Game.World
     buildTerrainVertices,
     buildWaterVertices,
     buildLeavesVertices,
+    buildGrassOverlayVertices,
     TerrainChunk (..),
     ChunkMesh (..),
     uploadChunk,
@@ -37,6 +38,9 @@ import Graphics.Rendering.OpenGL.GL qualified as GL
 import Linear
 import Utils.Monad
 import Utils.PerlinNoise (perlin2)
+
+defaultClimate :: Fractional a => (a,a)
+defaultClimate = (0.8, 0.4)
 
 -- TODO: Make non-monadic
 sample01ExplicitM :: Float -> Float -> Float -> (Float, Float) -> WorldGen Float
@@ -366,15 +370,15 @@ textureLayerOf OakLog NegZ = 21
 textureLayerOf OakLog _ = 22
 textureLayerOf OakLeaves _ = 23
 
-face :: V3 Float -> V3 Float -> V3 Float -> V3 Float -> Float -> [Float]
-face v1 v2 v3 v4 layer =
+face :: V3 Float -> V3 Float -> V3 Float -> V3 Float -> Float -> (Float, Float) -> [Float]
+face v1 v2 v3 v4 layer (t, h) =
   let tri a (u1, v1') b (u2, v2') c (u3, v3') =
         toList a
-          ++ [u1, v1', layer]
+          ++ [u1, v1', layer, t, h]
           ++ toList b
-          ++ [u2, v2', layer]
+          ++ [u2, v2', layer, t, h]
           ++ toList c
-          ++ [u3, v3', layer]
+          ++ [u3, v3', layer, t, h]
    in tri v1 (0, 0) v2 (1, 0) v3 (1, 1)
         ++ tri v1 (0, 0) v3 (1, 1) v4 (0, 1)
 
@@ -407,8 +411,13 @@ buildTerrainVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
             else
               concat
                 [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
-                      layer = textureLayerOf block dir
-                   in face v1 v2 v3 v4 layer
+                      layer = case (block, dir) of
+                        (Grass, NegX) -> 3
+                        (Grass, PosX) -> 3
+                        (Grass, NegY) -> 3
+                        (Grass, PosY) -> 3
+                        _ -> textureLayerOf block dir
+                   in face v1 v2 v3 v4 layer defaultClimate
                   | dir <- [NegX, PosX, NegY, PosY, NegZ, PosZ],
                     let neighborPos = worldPosI + dirOffset dir,
                     let neighbor = blockAtV3 chunk neighborPos,
@@ -435,7 +444,7 @@ buildWaterVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
                       (v5, v6, v7, v8) = faceCorners offsetWorldPos (invertTextureDirection dir)
                       -- Render water from below the surface
                       layer = textureLayerOf Water dir
-                   in face v1 v2 v3 v4 layer ++ face v5 v6 v7 v8 layer
+                   in face v1 v2 v3 v4 layer defaultClimate ++ face v5 v6 v7 v8 layer defaultClimate
                   | dir <- [PosZ], -- Do not render side vertices for water
                     let neighborPos = worldPosI + dirOffset dir,
                     blockAtV3 chunk neighborPos == Air
@@ -459,8 +468,29 @@ buildLeavesVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
                 [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
                       (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
                       layer = textureLayerOf OakLeaves dir
-                   in face v1 v2 v3 v4 layer ++ face v5 v6 v7 v8 layer
+                   in face v1 v2 v3 v4 layer (0.8, 0.4) ++ face v5 v6 v7 v8 layer (0.8, 0.4)
                   | dir <- [NegX, PosX, NegY, PosY, NegZ, PosZ]
+                ]
+            _ -> []
+      | lz <- [0 .. sz - 1],
+        ly <- [0 .. sy - 1],
+        lx <- [0 .. sx - 1]
+    ]
+
+buildGrassOverlayVertices :: TerrainChunk -> [Float]
+buildGrassOverlayVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
+  concat
+    [ let worldPosI = chunkOrigin + V3 lx ly lz
+          block = blockAtV3 chunk worldPosI
+       in case block of
+            Grass ->
+              concat
+                [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
+                   in face v1 v2 v3 v4 4 defaultClimate
+                  | dir <- [NegX, PosX, NegY, PosY],
+                    let neighborPos = worldPosI + dirOffset dir,
+                    let neighbor = blockAtV3 chunk neighborPos,
+                    not (blockOpaque neighbor)
                 ]
             _ -> []
       | lz <- [0 .. sz - 1],
@@ -485,13 +515,17 @@ uploadChunk verts = do
     GL.bufferData GL.ArrayBuffer $= (bytes, ptr, GL.StaticDraw)
 
   GL.vertexAttribPointer (GL.AttribLocation 0)
-    $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float (6 * 4) (plusPtr nullPtr 0))
+    $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float (8 * 4) (plusPtr nullPtr 0))
   GL.vertexAttribArray (GL.AttribLocation 0) $= GL.Enabled
 
   GL.vertexAttribPointer (GL.AttribLocation 1)
-    $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float (6 * 4) (plusPtr nullPtr (3 * 4)))
+    $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float (8 * 4) (plusPtr nullPtr (3 * 4)))
   GL.vertexAttribArray (GL.AttribLocation 1) $= GL.Enabled
-  pure $ ChunkMesh vao vbo (length verts `div` 6)
+  
+  GL.vertexAttribPointer (GL.AttribLocation 2)
+    $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float (8 * 4) (plusPtr nullPtr (6 * 4)))
+  GL.vertexAttribArray (GL.AttribLocation 2) $= GL.Enabled
+  pure $ ChunkMesh vao vbo (length verts `div` 8)
 
 deleteChunkMesh :: ChunkMesh -> IO ()
 deleteChunkMesh (ChunkMesh vao vbo _) = do

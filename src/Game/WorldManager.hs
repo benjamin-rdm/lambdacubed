@@ -57,7 +57,8 @@ data ChunkHandle = ChunkHandle
     chData :: !TerrainChunk,
     chOpaque :: !ChunkMesh,
     chWater :: !ChunkMesh,
-    chLeaves :: !ChunkMesh
+    chLeaves :: !ChunkMesh,
+    chGrassOverlay :: !ChunkMesh
   }
 
 type ChunkCoord = V2 Int
@@ -122,13 +123,16 @@ setBlockAtWorld pos newBlock = do
           let verts = buildTerrainVertices newChunk
               wverts = buildWaterVertices newChunk
               lverts = buildLeavesVertices newChunk
+              gverts = buildGrassOverlayVertices newChunk
           liftIO $ deleteChunkMesh (chOpaque h)
           liftIO $ deleteChunkMesh (chWater h)
           liftIO $ deleteChunkMesh (chLeaves h)
+          liftIO $ deleteChunkMesh (chGrassOverlay h)
           newOpaque <- liftIO $ uploadChunk verts
           newWater <- liftIO $ uploadChunk wverts
           newLeaves <- liftIO $ uploadChunk lverts
-          let updatedHandle = h {chData = newChunk, chOpaque = newOpaque, chWater = newWater, chLeaves = newLeaves}
+          newOverlay <- liftIO $ uploadChunk gverts
+          let updatedHandle = h {chData = newChunk, chOpaque = newOpaque, chWater = newWater, chLeaves = newLeaves, chGrassOverlay = newOverlay}
               updatedChunks = M.insert cc updatedHandle chunks
           modify $ \s -> s {cmsLoadedChunks = updatedChunks}
           pure True
@@ -141,10 +145,12 @@ buildChunkAt coord = do
       verts = buildTerrainVertices terrainChunk
       wverts = buildWaterVertices terrainChunk
       lverts = buildLeavesVertices terrainChunk
+      gverts = buildGrassOverlayVertices terrainChunk
   opaqueMesh <- liftIO $ uploadChunk verts
   waterMesh <- liftIO $ uploadChunk wverts
   leavesMesh <- liftIO $ uploadChunk lverts
-  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh leavesMesh
+  overlayMesh <- liftIO $ uploadChunk gverts
+  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh leavesMesh overlayMesh
 
 buildChunkAtIO :: WorldSource -> V2 Int -> IO ChunkHandle
 buildChunkAtIO ws coord = do
@@ -153,10 +159,12 @@ buildChunkAtIO ws coord = do
   let verts = buildTerrainVertices terrainChunk
       wverts = buildWaterVertices terrainChunk
       lverts = buildLeavesVertices terrainChunk
+      gverts = buildGrassOverlayVertices terrainChunk
   opaqueMesh <- uploadChunk verts
   waterMesh <- uploadChunk wverts
   leavesMesh <- uploadChunk lverts
-  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh leavesMesh
+  overlayMesh <- uploadChunk gverts
+  pure $ ChunkHandle coord origin terrainChunk opaqueMesh waterMesh leavesMesh overlayMesh
 
 loadChunk :: V2 Int -> ChunkManager ()
 loadChunk coord = do
@@ -166,10 +174,11 @@ loadChunk coord = do
     modify $ \s -> s {cmsLoadedChunks = M.insert coord handle (cmsLoadedChunks s)}
 
 unloadChunkHandle :: ChunkHandle -> ChunkManager ()
-unloadChunkHandle (ChunkHandle coord _ _ om wm lm) = do
+unloadChunkHandle (ChunkHandle coord _ _ om wm lm gom) = do
   liftIO $ deleteChunkMesh om
   liftIO $ deleteChunkMesh wm
   liftIO $ deleteChunkMesh lm
+  liftIO $ deleteChunkMesh gom
   modify $ \s -> s {cmsLoadedChunks = M.delete coord (cmsLoadedChunks s)}
 
 updatePlayerPosition :: V3 Float -> ChunkManager ()
