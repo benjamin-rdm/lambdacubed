@@ -1,5 +1,5 @@
-module Rendering.Shaders
-  ( loadProgramFromFiles,
+module Rendering.Shader.Utils
+  ( loadProgramFromSources,
     compileShader,
     linkShaderProgram,
   )
@@ -33,13 +33,12 @@ linkShaderProgram shaders = do
       programLog <- GL.get (GL.programInfoLog program)
       fail $ "Program linking failed: " ++ programLog
 
-loadShaderSource :: FilePath -> IO BS8.ByteString
-loadShaderSource = BS8.readFile
-
-loadProgramFromFiles :: FilePath -> FilePath -> IO GL.Program
-loadProgramFromFiles vertPath fragPath = do
-  vsrc <- loadShaderSource vertPath
-  fsrc <- loadShaderSource fragPath
-  vs <- compileShader GL.VertexShader vsrc
-  fs <- compileShader GL.FragmentShader fsrc
+loadProgramFromSources :: BS8.ByteString -> BS8.ByteString -> IO GL.Program
+loadProgramFromSources vertSrc fragSrc = do
+  putStrLn "GLSL Vertex Shader"
+  BS8.putStrLn vertSrc
+  putStrLn "GLSL Fragment Shader"
+  BS8.putStrLn fragSrc
+  vs <- compileShader GL.VertexShader vertSrc
+  fs <- compileShader GL.FragmentShader fragSrc
   linkShaderProgram [vs, fs]

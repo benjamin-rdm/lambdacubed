@@ -33,11 +33,17 @@ executable lambdacubed-exe
       Utils.PerlinNoise
       Utils.Monad
       Rendering.Texture
+      Rendering.Shader.AST
+      Rendering.Shader.Outline
+      Rendering.Shader.Sky
+      Rendering.Shader.Terrain
+      Rendering.Shader.Typed
+      Rendering.Shader.Utils
+      Rendering.Shader.UI
       Game.World
       Game.WorldManager
       Game.WorldConfig
       Game.Physics
-      Rendering.Shaders
       Game.WorldSource
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2 -optlo-O3 -funbox-strict-fields -fexcess-precision
   build-depends:

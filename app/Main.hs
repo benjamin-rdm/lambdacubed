@@ -18,7 +18,10 @@ import Graphics.Rendering.OpenGL.GL qualified as GL
 import Graphics.UI.GLFW qualified as GLFW
 import Linear
 import Rendering.Camera
-import Rendering.Shaders
+import Rendering.Shader.UI (loadUIProgram)
+import Rendering.Shader.Terrain (loadTerrainProgram)
+import Rendering.Shader.Sky (loadSkyProgram)
+import Rendering.Shader.Outline (loadOutlineProgram)
 import Rendering.Texture (createBlockTextureArray, loadTextureFromPng, setupTextureMode)
 import Utils.Math (toGLMatrix)
 
@@ -105,13 +108,6 @@ createVAOWithVertices vertices componentCount = do
   GL.bindVertexArrayObject $= Nothing
 
   pure (vao, vbo)
-
-setupShaderWithUniforms :: FilePath -> FilePath -> [String] -> IO (GL.Program, [GL.UniformLocation])
-setupShaderWithUniforms vertPath fragPath uniformNames = do
-  prog <- loadProgramFromFiles vertPath fragPath
-  GL.currentProgram $= Just prog
-  uniforms <- mapM (GL.get . GL.uniformLocation prog) uniformNames
-  pure (prog, uniforms)
 
 isKeyPressed :: GLFW.Window -> GLFW.Key -> IO Bool
 isKeyPressed win key = (== GLFW.KeyState'Pressed) <$> GLFW.getKey win key
@@ -230,6 +226,7 @@ initializeWindow = do
       GLFW.windowHint $ GLFW.WindowHint'ContextVersionMinor 3
       GLFW.windowHint $ GLFW.WindowHint'OpenGLForwardCompat True
       GLFW.windowHint $ GLFW.WindowHint'OpenGLProfile GLFW.OpenGLProfile'Core
+      GLFW.windowHint $ GLFW.WindowHint'Samples (Just 4)
 
       mwin <- GLFW.createWindow C.windowWidth C.windowHeight "game window" Nothing Nothing
       case mwin of
@@ -254,13 +251,14 @@ setupOpenGL win aspectRef = do
   GL.clearDepth $= 1
   GL.frontFace $= GL.CCW
   GL.cullFace $= Just GL.Back
+  GL.multisample $= GL.Enabled
 
 setupTerrainShader :: IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
 setupTerrainShader = do
-  (terrainProg, [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff, uGrassColormap, uFoliageColormap]) <-
-    setupShaderWithUniforms
-      "shaders/basic.vert"
-      "shaders/basic.frag"
+  terrainProg <- loadTerrainProgram
+  GL.currentProgram $= Just terrainProg
+  [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff, uGrassColormap, uFoliageColormap] <-
+    mapM (GL.get . GL.uniformLocation terrainProg)
       ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas", "uAlphaCutoff", "uGrassColormap", "uFoliageColormap"]
 
   atlas <- createBlockTextureArray
@@ -292,11 +290,9 @@ setupTerrainShader = do
 
 setupSkyShader :: IO (GL.Program, GL.VertexArrayObject, GL.BufferObject)
 setupSkyShader = do
-  (skyProg, [uSkyTop, uSkyHorizon]) <-
-    setupShaderWithUniforms
-      "shaders/sky.vert"
-      "shaders/sky.frag"
-      ["uTopColor", "uHorizonColor"]
+  skyProg <- loadSkyProgram
+  GL.currentProgram $= Just skyProg
+  [uSkyTop, uSkyHorizon] <- mapM (GL.get . GL.uniformLocation skyProg) ["uTopColor", "uHorizonColor"]
 
   let skyTop = GL.Color3 0.45 0.70 (0.95 :: Float)
       skyHorizon = GL.Color3 0.60 0.78 (0.92 :: Float)
@@ -324,11 +320,9 @@ setupSkyShader = do
 
 setupOutlineShader :: IO (GL.Program, GL.VertexArrayObject, GL.BufferObject, GL.UniformLocation, GL.UniformLocation)
 setupOutlineShader = do
-  (outlineProg, [uOutlineView, uOutlineProj]) <-
-    setupShaderWithUniforms
-      "shaders/outline.vert"
-      "shaders/outline.frag"
-      ["uView", "uProj"]
+  outlineProg <- loadOutlineProgram
+  GL.currentProgram $= Just outlineProg
+  [uOutlineView, uOutlineProj] <- mapM (GL.get . GL.uniformLocation outlineProg) ["uView", "uProj"]
 
   vao <- GL.genObjectName
   vbo <- GL.genObjectName
@@ -348,11 +342,9 @@ setupOutlineShader = do
 
 setupUIShader :: IO (GL.Program, GL.TextureObject, GL.VertexArrayObject, GL.BufferObject, GL.UniformLocation, GL.UniformLocation)
 setupUIShader = do
-  (uiProg, [uUiTex, uAspect]) <-
-    setupShaderWithUniforms
-      "shaders/ui.vert"
-      "shaders/ui.frag"
-      ["uUiTex", "uAspect"]
+  uiProg <- loadUIProgram
+  GL.currentProgram $= Just uiProg
+  [uUiTex, uAspect] <- mapM (GL.get . GL.uniformLocation uiProg) ["uUiTex", "uAspect"]
 
   uiTex <- GL.genObjectName
   GL.activeTexture $= GL.TextureUnit 1
