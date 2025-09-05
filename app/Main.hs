@@ -4,7 +4,6 @@ import App.Config qualified as C
 import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader, ReaderT (..), ask)
-import Control.Monad.State.Class (get)
 import Control.Monad.Trans.Class (lift)
 import Data.IORef
 import Data.Map.Strict qualified as M
