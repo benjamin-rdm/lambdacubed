@@ -1,0 +1,73 @@
+module Game.ChunkWorkers
+  ( PreparedChunk (..),
+    ChunkWorkers (..),
+    startChunkWorkers,
+    requestChunk,
+    tryPopPrepared,
+  )
+where
+
+import App.Config
+import Control.Concurrent.Async (async, link)
+import Control.Concurrent.STM
+import Control.DeepSeq (force)
+import Data.Vector.Storable qualified as VS
+import Game.World
+import Game.WorldSource
+import Linear
+import Rendering.Mesh (Mesh (..))
+
+-- The returned chunks by a worker. We COULD split this work up into loading terrain and
+-- building meshes, but this seems to be easier.
+data PreparedChunk = PreparedChunk
+  { pcCoord :: !(V2 Int),
+    pcOrigin :: !(V3 Int),
+    pcTerrain :: !TerrainChunk,
+    pcMeshes :: !(Mesh (VS.Vector Float))
+  }
+
+data ChunkWorkers = ChunkWorkers
+  { cwQ :: !(TBQueue (V2 Int)),
+    cwResQ :: !(TBQueue PreparedChunk)
+  }
+
+requestChunk :: ChunkWorkers -> V2 Int -> STM ()
+requestChunk ChunkWorkers {cwQ} = writeTBQueue cwQ
+
+tryPopPrepared :: ChunkWorkers -> STM (Maybe PreparedChunk)
+tryPopPrepared ChunkWorkers {cwResQ} = tryReadTBQueue cwResQ
+
+-- TODO: Investigate possible issues of having this value misconfigured.
+resultQueueSize :: Int
+resultQueueSize = 128
+
+incomingQueueSize :: Int
+incomingQueueSize = 128
+
+startChunkWorkers :: Int -> WorldSource -> IO ChunkWorkers
+startChunkWorkers n ws = do
+  q <- newTBQueueIO (fromIntegral incomingQueueSize)
+  resQ <- newTBQueueIO (fromIntegral resultQueueSize)
+  let worker = workerLoop q resQ ws
+  mapM_ (const (async worker >>= link)) [1 .. max 1 n]
+  return (ChunkWorkers q resQ)
+
+workerLoop :: TBQueue (V2 Int) -> TBQueue PreparedChunk -> WorldSource -> IO ()
+workerLoop coordQ resQ ws = do
+  coord <- atomically $ readTBQueue coordQ
+  terrain <- ws coord
+  let origin = V3 (cx * sx) (cy * sy) 0
+        where
+          V2 cx cy = coord
+          V3 sx sy _ = chunkSize
+
+  let opaque = buildTerrainVertices terrain
+      water = buildWaterVertices terrain
+      leaves = buildLeavesVertices terrain
+      grass = buildGrassOverlayVertices terrain
+      prepared = PreparedChunk coord origin terrain (Mesh opaque water leaves grass)
+  -- This forces the evalation of the meshes on the worker thread
+  let Mesh o w l g = pcMeshes prepared
+  !_ <- pure (force (VS.length o + VS.length w + VS.length l + VS.length g))
+  atomically $ writeTBQueue resQ prepared
+  workerLoop coordQ resQ ws

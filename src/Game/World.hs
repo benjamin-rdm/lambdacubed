@@ -13,33 +13,35 @@ module Game.World
     buildLeavesVertices,
     buildGrassOverlayVertices,
     TerrainChunk (..),
-    ChunkMesh (..),
-    uploadChunk,
-    deleteChunkMesh,
+    GpuMesh (..),
+    uploadGpuMesh,
+    deleteGpuMesh,
     blockAtV3,
     setBlockInChunk,
   )
 where
 
+import App.Config (chunkSize)
+import Control.Monad (when)
 import Control.Monad.Reader
+import Control.Monad.ST (ST)
 import Control.Monad.State (State, execState, modify)
-import Data.Foldable
 import Data.IntMap.Strict qualified as IM
 import Data.Maybe
+import Data.STRef
 import Data.Vector.Storable qualified as VS
+import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word8)
-import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (Ptr, castPtr, nullPtr, plusPtr)
 import Foreign.Storable (Storable (..), sizeOf)
 import GHC.Generics (Generic)
-import Game.WorldConfig (worldChunkSize)
 import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Linear
 import Utils.Monad
 import Utils.PerlinNoise (perlin2)
 
-defaultClimate :: Fractional a => (a,a)
+defaultClimate :: (Fractional a) => (a, a)
 defaultClimate = (0.8, 0.4)
 
 -- TODO: Make non-monadic
@@ -65,8 +67,8 @@ isWithinChunkBounds :: V3 Int -> V3 Int -> Bool
 isWithinChunkBounds (V3 lx ly lz) (V3 sx sy sz) =
   lx >= 0 && ly >= 0 && lz >= 0 && lx < sx && ly < sy && lz < sz
 
-positionToIndex :: V3 Int -> V3 Int -> Int -> Maybe Int
-positionToIndex pos chunkSize xySize =
+positionToIndex :: V3 Int -> Int -> Maybe Int
+positionToIndex pos xySize =
   let V3 lx ly lz = pos
       V3 sx sy sz = chunkSize
    in if isWithinChunkBounds (V3 lx ly lz) (V3 sx sy sz)
@@ -74,14 +76,17 @@ positionToIndex pos chunkSize xySize =
         else Nothing
 
 setBlockInChunk :: TerrainChunk -> V3 Int -> Block -> Maybe TerrainChunk
-setBlockInChunk (TerrainChunk org@(V3 ox oy oz) (V3 sx sy sz) blocks) (V3 x y z) newB =
-  let lx = x - ox; ly = y - oy; lz = z - oz
+setBlockInChunk (TerrainChunk org@(V3 ox oy oz) blocks) (V3 x y z) newB =
+  let (V3 sx sy sz) = chunkSize
+      lx = x - ox
+      ly = y - oy
+      lz = z - oz
    in if lx < 0 || ly < 0 || lz < 0 || lx >= sx || ly >= sy || lz >= sz
         then Nothing
         else
           let i = lx + ly * sx + lz * sx * sy
               blocks' = blocks VS.// [(i, newB)]
-           in Just (TerrainChunk org (V3 sx sy sz) blocks')
+           in Just (TerrainChunk org blocks')
 
 data WorldGenConfig = WorldGenConfig
   { wgNoiseFreq :: !Float,
@@ -129,7 +134,6 @@ defaultWorldGenConfig =
 
 data TerrainChunk = TerrainChunk
   { tOrigin :: !(V3 Int),
-    tSize :: !(V3 Int),
     tBlocks :: !(VS.Vector Block)
   }
 
@@ -138,23 +142,23 @@ type WorldGen = Reader WorldGenConfig
 type WorldPos = V3 Int
 
 treeHeightDefault :: Int
-treeHeightDefault = 7
+treeHeightDefault = 5
 
 leafRadiusDefault :: Int
-leafRadiusDefault = 3
+leafRadiusDefault = 2
 
 genTerrainChunk :: V3 Int -> TerrainChunk
 genTerrainChunk origin = runReader (genTerrainChunkM origin) defaultWorldGenConfig
 
 genTerrainChunkAtCoord :: V2 Int -> TerrainChunk
 genTerrainChunkAtCoord (V2 cx cy) =
-  let V3 sx sy _ = worldChunkSize
+  let V3 sx sy _ = chunkSize
       origin = V3 (cx * sx) (cy * sy) 0
    in genTerrainChunk origin
 
 genTerrainChunkM :: V3 Int -> WorldGen TerrainChunk
 genTerrainChunkM org@(V3 ox oy _oz) = do
-  let V3 sx sy sz = worldChunkSize
+  let V3 sx sy sz = chunkSize
       !totalSize = sx * sy * sz
       !xySize = sx * sy
 
@@ -184,15 +188,15 @@ genTerrainChunkM org@(V3 ox oy _oz) = do
          in classify z h waterLevelZ
 
       !baseBlocks = VS.generate totalSize blockAtIndex
-      !baseChunk = TerrainChunk org worldChunkSize baseBlocks
+      !baseChunk = TerrainChunk org baseBlocks
   generateTreesM baseChunk
 
 generateTreesM :: TerrainChunk -> WorldGen TerrainChunk
-generateTreesM chunk@(TerrainChunk org siz blocks) = do
+generateTreesM chunk@(TerrainChunk org blocks) = do
   positions <- findTreePositionsM chunk
   let im = execState (mapM_ (treeBuilder chunk) positions) IM.empty
       newBlocks = blocks VS.// IM.toList im
-  pure $ TerrainChunk org siz newBlocks
+  pure $ TerrainChunk org newBlocks
 
 type ChunkBuilder = State (IM.IntMap Block)
 
@@ -231,16 +235,18 @@ alignedRange from to step =
    in [first, first + step .. to]
 
 chunkBoundsWithMargin :: TerrainChunk -> Int -> (Int, Int, Int, Int)
-chunkBoundsWithMargin (TerrainChunk (V3 ox oy _oz) (V3 sx sy _sz) _) margin =
-  let fromX = ox - margin
+chunkBoundsWithMargin (TerrainChunk (V3 ox oy _oz) _) margin =
+  let (V3 sx sy _) = chunkSize
+      fromX = ox - margin
       toX = ox + sx - 1 + margin
       fromY = oy - margin
       toY = oy + sy - 1 + margin
    in (fromX, toX, fromY, toY)
 
 findTreePositionsM :: TerrainChunk -> WorldGen [V3 Int]
-findTreePositionsM chunk@(TerrainChunk (V3 _ox _oy oz) (V3 _sx _sy sz) _) = do
-  let margin = leafRadiusDefault + 1
+findTreePositionsM chunk@(TerrainChunk (V3 _ox _oy oz) _) = do
+  let (V3 _ _ sz) = chunkSize
+      margin = leafRadiusDefault + 1
       (fromX, toX, fromY, toY) = chunkBoundsWithMargin chunk margin
       xs = alignedRange fromX toX treeSpacingStep
       ys = alignedRange fromY toY treeSpacingStep
@@ -269,8 +275,8 @@ shouldPlaceTreeM !x !y = do
   pure (key > (1.0 - p))
 
 addBlock :: TerrainChunk -> Block -> V3 Int -> ChunkBuilder ()
-addBlock (TerrainChunk origin chunkSize _) b posWorld =
-  whenJust (localIndex origin chunkSize posWorld) $ \idx -> modify (IM.insertWith combine idx b)
+addBlock (TerrainChunk origin _) b posWorld =
+  whenJust (localIndex origin posWorld) $ \idx -> modify (IM.insertWith combine idx b)
   where
     combine new old = case (old, new) of
       -- We do not want leaves of one tree to overwrite logs of another tree
@@ -278,15 +284,15 @@ addBlock (TerrainChunk origin chunkSize _) b posWorld =
       (_, OakLog) -> new
       _ -> new
 
-localIndex :: V3 Int -> V3 Int -> V3 Int -> Maybe Int
-localIndex origin chunkSize posWorld =
+localIndex :: V3 Int -> V3 Int -> Maybe Int
+localIndex origin posWorld =
   let V3 sx sy _ = chunkSize
       xySize = sx * sy
-   in positionToIndex (posWorld - origin) chunkSize xySize
+   in positionToIndex (posWorld - origin) xySize
 
 heightAtWorldM :: Int -> Int -> WorldGen Int
 heightAtWorldM wx wy = do
-  let V3 _ _ sz = worldChunkSize
+  let V3 _ _ sz = chunkSize
       pos = (fromIntegral wx, fromIntegral wy)
   f <- noiseFreqM
   h1 <- sample01AtFreqM f pos
@@ -297,7 +303,7 @@ heightAtWorldM wx wy = do
   pure $ clamp (base + floor (fromIntegral amp * h)) 0 sz
 
 blockAt :: TerrainChunk -> Int -> Int -> Int -> Block
-blockAt (TerrainChunk origin chunkSize bm) !x !y !z =
+blockAt (TerrainChunk origin bm) !x !y !z =
   let V3 ox oy oz = origin
       V3 sx sy _ = chunkSize
       !xySize = sx * sy
@@ -370,17 +376,34 @@ textureLayerOf OakLog NegZ = 21
 textureLayerOf OakLog _ = 22
 textureLayerOf OakLeaves _ = 23
 
-face :: V3 Float -> V3 Float -> V3 Float -> V3 Float -> Float -> (Float, Float) -> [Float]
-face v1 v2 v3 v4 layer (t, h) =
-  let tri a (u1, v1') b (u2, v2') c (u3, v3') =
-        toList a
-          ++ [u1, v1', layer, t, h]
-          ++ toList b
-          ++ [u2, v2', layer, t, h]
-          ++ toList c
-          ++ [u3, v3', layer, t, h]
-   in tri v1 (0, 0) v2 (1, 0) v3 (1, 1)
-        ++ tri v1 (0, 0) v3 (1, 1) v4 (0, 1)
+-- Write two triangles (6 vertices) for a quad directly into a mutable vector.
+-- Each vertex layout: px, py, pz, u, v, layer, temperature, humidity
+writeFace :: VSM.MVector s Float -> Int -> V3 Float -> V3 Float -> V3 Float -> V3 Float -> Float -> (Float, Float) -> ST s Int
+writeFace mv off v1 v2 v3 v4 layer (t, h) = do
+  let writeVertex i (V3 px py pz) (u, v) = do
+        VSM.unsafeWrite mv (i + 0) px
+        VSM.unsafeWrite mv (i + 1) py
+        VSM.unsafeWrite mv (i + 2) pz
+        VSM.unsafeWrite mv (i + 3) u
+        VSM.unsafeWrite mv (i + 4) v
+        VSM.unsafeWrite mv (i + 5) layer
+        VSM.unsafeWrite mv (i + 6) t
+        VSM.unsafeWrite mv (i + 7) h
+      vertiexSize = 8
+      writeTriangle i a ua b ub c uc = do
+        writeVertex i a ua
+        writeVertex (i + vertiexSize) b ub
+        writeVertex (i + 2 * vertiexSize) c uc
+        pure (i + 3 * vertiexSize)
+  i1 <- writeTriangle off v1 (0, 0) v2 (1, 0) v3 (1, 1)
+  writeTriangle i1 v1 (0, 0) v3 (1, 1) v4 (0, 1)
+
+-- Helper function to keep index in STRef
+emitFace :: VSM.MVector s Float -> Data.STRef.STRef s Int -> V3 Float -> V3 Float -> V3 Float -> V3 Float -> Float -> (Float, Float) -> ST s ()
+emitFace mv indexRef v1 v2 v3 v4 layer climate = do
+  index <- Data.STRef.readSTRef indexRef
+  index' <- writeFace mv index v1 v2 v3 v4 layer climate
+  Data.STRef.writeSTRef indexRef index'
 
 faceCorners :: (Real a) => V3 a -> TextureDirection -> (V3 Float, V3 Float, V3 Float, V3 Float)
 faceCorners (V3 x y z) dir =
@@ -401,117 +424,145 @@ faceCorners (V3 x y z) dir =
         NegY -> (p101, p001, p000, p100)
         PosY -> (p011, p111, p110, p010)
 
-buildTerrainVertices :: TerrainChunk -> [Float]
-buildTerrainVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
-  concat
-    [ let worldPosI = chunkOrigin + V3 lx ly lz
-          block = blockAtV3 chunk worldPosI
-       in if not (blockOpaque block)
-            then []
-            else
-              concat
-                [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
-                      layer = case (block, dir) of
-                        (Grass, NegX) -> 3
-                        (Grass, PosX) -> 3
-                        (Grass, NegY) -> 3
-                        (Grass, PosY) -> 3
-                        _ -> textureLayerOf block dir
-                   in face v1 v2 v3 v4 layer defaultClimate
-                  | dir <- [NegX, PosX, NegY, PosY, NegZ, PosZ],
-                    let neighborPos = worldPosI + dirOffset dir,
-                    let neighbor = blockAtV3 chunk neighborPos,
-                    not (blockOpaque neighbor)
-                ]
-      | lz <- [0 .. sz - 1],
-        ly <- [0 .. sy - 1],
-        lx <- [0 .. sx - 1]
-    ]
+buildTerrainVertices :: TerrainChunk -> VS.Vector Float
+buildTerrainVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
+  let (V3 sx sy sz) = chunkSize
+      dirs = [NegX, PosX, NegY, PosY, NegZ, PosZ]
+      positions = [chunkOrigin + V3 lx ly lz | lz <- [0 .. sz - 1], ly <- [0 .. sy - 1], lx <- [0 .. sx - 1]]
+      faceVisible worldPosI dir = not (blockOpaque (blockAtV3 chunk (worldPosI + dirOffset dir)))
+      countFaces =
+        sum
+          [ length [() | dir <- dirs, faceVisible worldPosI dir]
+            | worldPosI <- positions,
+              let block = blockAtV3 chunk worldPosI,
+              blockOpaque block
+          ]
+      floatsPerFace = 6 * 8
+      totalFloats = countFaces * floatsPerFace
+  mv <- VSM.new totalFloats
+  offRef <- Data.STRef.newSTRef 0
+  let writeDir worldPosI block dir = do
+        when (faceVisible worldPosI dir) $ do
+          let (v1, v2, v3, v4) = faceCorners worldPosI dir
+              layer = case (block, dir) of
+                (Grass, NegX) -> 3
+                (Grass, PosX) -> 3
+                (Grass, NegY) -> 3
+                (Grass, PosY) -> 3
+                _ -> textureLayerOf block dir
+          emitFace mv offRef v1 v2 v3 v4 layer defaultClimate
+  mapM_
+    ( \worldPosI ->
+        let block = blockAtV3 chunk worldPosI
+         in when (blockOpaque block) $ mapM_ (writeDir worldPosI block) dirs
+    )
+    positions
+  pure mv
 
 -- Render water slightly below the surface of the block
 waterLevelOffset :: Float
 waterLevelOffset = 0.1
 
-buildWaterVertices :: TerrainChunk -> [Float]
-buildWaterVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
-  concat
-    [ let worldPosI = chunkOrigin + V3 lx ly lz
-       in case blockAtV3 chunk worldPosI of
-            Water ->
-              concat
-                [ let offsetWorldPos = (fromIntegral <$> worldPosI) - V3 0 0 waterLevelOffset
-                      (v1, v2, v3, v4) = faceCorners offsetWorldPos dir
-                      (v5, v6, v7, v8) = faceCorners offsetWorldPos (invertTextureDirection dir)
-                      -- Render water from below the surface
-                      layer = textureLayerOf Water dir
-                   in face v1 v2 v3 v4 layer defaultClimate ++ face v5 v6 v7 v8 layer defaultClimate
-                  | dir <- [PosZ], -- Do not render side vertices for water
-                    let neighborPos = worldPosI + dirOffset dir,
-                    blockAtV3 chunk neighborPos == Air
-                ]
-            _ -> []
-      | lz <- [0 .. sz - 1],
-        ly <- [0 .. sy - 1],
-        lx <- [0 .. sx - 1]
-    ]
+-- TODO: Investigate if a fold instead of mapM_ would help performance
+-- because we do not need to keep an STRef around
+buildWaterVertices :: TerrainChunk -> VS.Vector Float
+buildWaterVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
+  let (V3 sx sy sz) = chunkSize
+      positions = [chunkOrigin + V3 lx ly lz | lz <- [0 .. sz - 1], ly <- [0 .. sy - 1], lx <- [0 .. sx - 1]]
+      qualifies worldPosI =
+        blockAtV3 chunk worldPosI == Water
+          && blockAtV3 chunk (worldPosI + dirOffset PosZ) == Air
+      countFaces = 2 * sum [1 | worldPosI <- positions, qualifies worldPosI]
+      floatsPerFace = 6 * 8
+      totalFloats = countFaces * floatsPerFace
+  mv <- VSM.new totalFloats
+  indexRef <- Data.STRef.newSTRef 0
+  let dir = PosZ
+  mapM_
+    ( \worldPosI ->
+        when (qualifies worldPosI) $ do
+          let offsetWorldPos = (fromIntegral <$> worldPosI) - V3 0 0 waterLevelOffset
+              (v1, v2, v3, v4) = faceCorners offsetWorldPos dir
+              (v5, v6, v7, v8) = faceCorners offsetWorldPos (invertTextureDirection dir)
+              layer = textureLayerOf Water dir
+          emitFace mv indexRef v1 v2 v3 v4 layer defaultClimate
+          emitFace mv indexRef v5 v6 v7 v8 layer defaultClimate
+    )
+    positions
+  pure mv
 
-buildLeavesVertices :: TerrainChunk -> [Float]
-buildLeavesVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
-  concat
-    [ let worldPosI = chunkOrigin + V3 lx ly lz
-       in case blockAtV3 chunk worldPosI of
-            OakLeaves ->
-              -- Render all leaf faces regardless of neighbors
-              -- This creates a more dense apperance of the leaves.
-              -- Also render them from both sides
-              concat
-                [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
-                      (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
-                      layer = textureLayerOf OakLeaves dir
-                   in face v1 v2 v3 v4 layer (0.8, 0.4) ++ face v5 v6 v7 v8 layer (0.8, 0.4)
-                  | dir <- [NegX, PosX, NegY, PosY, NegZ, PosZ]
-                ]
-            _ -> []
-      | lz <- [0 .. sz - 1],
-        ly <- [0 .. sy - 1],
-        lx <- [0 .. sx - 1]
-    ]
+buildLeavesVertices :: TerrainChunk -> VS.Vector Float
+buildLeavesVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
+  let (V3 sx sy sz) = chunkSize
+      dirs = [NegX, PosX, NegY, PosY, NegZ, PosZ]
+      positions = [chunkOrigin + V3 lx ly lz | lz <- [0 .. sz - 1], ly <- [0 .. sy - 1], lx <- [0 .. sx - 1]]
+      isLeaves worldPosI = blockAtV3 chunk worldPosI == OakLeaves
+      leavesBlocks = length [() | worldPosI <- positions, isLeaves worldPosI]
+      countFaces = leavesBlocks * 12
+      floatsPerFace = 6 * 8
+      totalFloats = countFaces * floatsPerFace
+  mv <- VSM.new totalFloats
+  indexRef <- Data.STRef.newSTRef 0
+  mapM_
+    ( \worldPosI ->
+        when (isLeaves worldPosI) $
+          mapM_
+            ( \dir -> do
+                let (v1, v2, v3, v4) = faceCorners worldPosI dir
+                    (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
+                    layer = textureLayerOf OakLeaves dir
+                emitFace mv indexRef v1 v2 v3 v4 layer (0.8, 0.4)
+                emitFace mv indexRef v5 v6 v7 v8 layer (0.8, 0.4)
+            )
+            dirs
+    )
+    positions
+  pure mv
 
-buildGrassOverlayVertices :: TerrainChunk -> [Float]
-buildGrassOverlayVertices chunk@(TerrainChunk chunkOrigin (V3 sx sy sz) _) =
-  concat
-    [ let worldPosI = chunkOrigin + V3 lx ly lz
-          block = blockAtV3 chunk worldPosI
-       in case block of
-            Grass ->
-              concat
-                [ let (v1, v2, v3, v4) = faceCorners worldPosI dir
-                   in face v1 v2 v3 v4 4 defaultClimate
-                  | dir <- [NegX, PosX, NegY, PosY],
-                    let neighborPos = worldPosI + dirOffset dir,
-                    let neighbor = blockAtV3 chunk neighborPos,
-                    not (blockOpaque neighbor)
-                ]
-            _ -> []
-      | lz <- [0 .. sz - 1],
-        ly <- [0 .. sy - 1],
-        lx <- [0 .. sx - 1]
-    ]
+buildGrassOverlayVertices :: TerrainChunk -> VS.Vector Float
+buildGrassOverlayVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
+  let (V3 sx sy sz) = chunkSize
+      dirs = [NegX, PosX, NegY, PosY]
+      positions = [chunkOrigin + V3 lx ly lz | lz <- [0 .. sz - 1], ly <- [0 .. sy - 1], lx <- [0 .. sx - 1]]
+      faceVisible worldPosI dir = not (blockOpaque (blockAtV3 chunk (worldPosI + dirOffset dir)))
+      countFaces =
+        sum
+          [ length [() | dir <- dirs, faceVisible worldPosI dir]
+            | worldPosI <- positions,
+              blockAtV3 chunk worldPosI == Grass
+          ]
+      floatsPerFace = 6 * 8
+      totalFloats = countFaces * floatsPerFace
+  mv <- VSM.new totalFloats
+  indexRef <- Data.STRef.newSTRef 0
+  mapM_
+    ( \worldPosI ->
+        when (blockAtV3 chunk worldPosI == Grass) $
+          mapM_
+            ( \dir ->
+                when (faceVisible worldPosI dir) $ do
+                  let (v1, v2, v3, v4) = faceCorners worldPosI dir
+                  emitFace mv indexRef v1 v2 v3 v4 4 defaultClimate
+            )
+            dirs
+    )
+    positions
+  pure mv
 
-data ChunkMesh = ChunkMesh
-  { cmVAO :: !GL.VertexArrayObject,
-    cmVBO :: !GL.BufferObject,
-    cmCount :: !Int
+data GpuMesh = GpuMesh
+  { gmVAO :: !GL.VertexArrayObject,
+    gmVBO :: !GL.BufferObject,
+    gmCount :: !Int
   }
 
-uploadChunk :: [Float] -> IO ChunkMesh
-uploadChunk verts = do
+uploadGpuMesh :: VS.Vector Float -> IO GpuMesh
+uploadGpuMesh verts = do
   vao <- GL.genObjectName
   vbo <- GL.genObjectName
   GL.bindVertexArrayObject $= Just vao
   GL.bindBuffer GL.ArrayBuffer $= Just vbo
-  withArray verts $ \ptr -> do
-    let bytes = fromIntegral (length verts * sizeOf (undefined :: Float))
+  VS.unsafeWith verts $ \ptr -> do
+    let bytes = fromIntegral (VS.length verts * sizeOf (undefined :: Float))
     GL.bufferData GL.ArrayBuffer $= (bytes, ptr, GL.StaticDraw)
 
   GL.vertexAttribPointer (GL.AttribLocation 0)
@@ -521,13 +572,13 @@ uploadChunk verts = do
   GL.vertexAttribPointer (GL.AttribLocation 1)
     $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float (8 * 4) (plusPtr nullPtr (3 * 4)))
   GL.vertexAttribArray (GL.AttribLocation 1) $= GL.Enabled
-  
+
   GL.vertexAttribPointer (GL.AttribLocation 2)
     $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float (8 * 4) (plusPtr nullPtr (6 * 4)))
   GL.vertexAttribArray (GL.AttribLocation 2) $= GL.Enabled
-  pure $ ChunkMesh vao vbo (length verts `div` 8)
+  pure $ GpuMesh vao vbo (VS.length verts `div` 8)
 
-deleteChunkMesh :: ChunkMesh -> IO ()
-deleteChunkMesh (ChunkMesh vao vbo _) = do
+deleteGpuMesh :: GpuMesh -> IO ()
+deleteGpuMesh (GpuMesh vao vbo _) = do
   GL.deleteObjectName vbo
   GL.deleteObjectName vao

@@ -1,29 +1,35 @@
-module Main where
+module Main (main) where
 
 import App.Config qualified as C
-import Control.Monad (unless, when)
+import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO (..))
-import Control.Monad.Reader (ReaderT (..), ask)
+import Control.Monad.Reader (MonadReader, ReaderT (..), ask)
+import Control.Monad.State.Class (get)
+import Control.Monad.Trans.Class (lift)
 import Data.IORef
-import qualified Data.Map.Strict as Map
 import Data.Map.Strict qualified as M
+import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (nullPtr, plusPtr)
-import Game.WorldManager
+import Game.ChunkWorkers
 import Game.Physics
 import Game.World
+import Game.WorldManager
+import Game.WorldSource (generatedTerrian)
 import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Graphics.UI.GLFW qualified as GLFW
 import Linear
 import Rendering.Camera
-import Rendering.Shader.UI (loadUIProgram)
-import Rendering.Shader.Terrain (loadTerrainProgram)
-import Rendering.Shader.Sky (loadSkyProgram)
+import Rendering.Mesh (Mesh (..))
 import Rendering.Shader.Outline (loadOutlineProgram)
+import Rendering.Shader.Sky (loadSkyProgram)
+import Rendering.Shader.Terrain (loadTerrainProgram)
+import Rendering.Shader.UI (loadUIProgram)
 import Rendering.Texture (createBlockTextureArray, loadTextureFromPng, setupTextureMode)
 import Utils.Math (toGLMatrix)
+import Utils.Monad
 
 data RenderState = RenderState
   { rsTerrainProg :: !GL.Program,
@@ -46,7 +52,8 @@ data RenderState = RenderState
     rsUIVAO :: !GL.VertexArrayObject,
     rsUIVBO :: !GL.BufferObject,
     rsUUiTex :: !GL.UniformLocation,
-    rsUUiAspect :: !GL.UniformLocation
+    rsUUiAspect :: !GL.UniformLocation,
+    rsUAlphaCutoff :: !GL.UniformLocation
   }
 
 data Env = Env
@@ -58,19 +65,40 @@ data Env = Env
     envFpsRef :: !(IORef (Int, Double)),
     envOutlineRef :: !(IORef Bool),
     envKeyPrevRef :: !(IORef (Map.Map GLFW.Key Bool)),
-    envCMRef :: !(IORef ChunkManagerState),
+    envCMRef :: !(IORef WorldState),
+    envCMConfig :: !WorldConfig,
     envAspectRef :: !(IORef Float),
     envRender :: !RenderState
   }
 
-newtype AppM a = AppM {unAppM :: ReaderT Env IO a}
-  deriving (Functor, Applicative, Monad, MonadIO)
+newtype AppT m a = AppM {unAppM :: ReaderT Env m a}
+  deriving (Functor, Applicative, Monad, MonadIO, MonadReader Env)
+
+type AppM = AppT IO
+
+type GameM = WorldT AppM
+
+runGameM :: GameM a -> AppM a
+runGameM act = do
+  Env {envCMRef, envCMConfig} <- askEnv
+  cm <- liftIO $ readIORef envCMRef
+  (v, cm') <- runWorld envCMConfig cm act
+  liftIO $ writeIORef envCMRef cm'
+  pure v
+
+class (Monad m) => MonadEnv m where
+  askEnv :: m Env
+
+instance MonadEnv AppM where
+  askEnv :: AppM Env
+  askEnv = AppM ask
+
+instance MonadEnv GameM where
+  askEnv :: GameM Env
+  askEnv = lift . lift $ askEnv
 
 runAppM :: Env -> AppM a -> IO a
 runAppM env act = runReaderT (unAppM act) env
-
-askEnv :: AppM Env
-askEnv = AppM ask
 
 getCurrentTime :: IO Double
 getCurrentTime = fromMaybe 0 <$> GLFW.getTime
@@ -120,14 +148,6 @@ isKeyJustPressed win ref key = do
   writeIORef ref (Map.insert key curr prevMap)
   pure (curr && not prev)
 
-isKeyJustReleased :: GLFW.Window -> IORef (Map.Map GLFW.Key Bool) -> GLFW.Key -> IO Bool
-isKeyJustReleased win ref key = do
-  curr <- isKeyPressed win key
-  prevMap <- readIORef ref
-  let prev = Map.findWithDefault False key prevMap
-  writeIORef ref (Map.insert key curr prevMap)
-  pure (not curr && prev)
-
 cursorPosCallback :: IORef Camera -> GLFW.CursorPosCallback
 cursorPosCallback ref _ xpos ypos = modifyIORef' ref (applyMousePos (xpos, ypos))
 
@@ -153,15 +173,15 @@ handleOutlineToggle win outlineEnabledRef keyPrevRef = do
   justPressed <- isKeyJustPressed win keyPrevRef GLFW.Key'O
   when justPressed $ modifyIORef' outlineEnabledRef not
 
-updatePlayerAndCamera :: AppM ()
+updatePlayerAndCamera :: (MonadEnv m, MonadWorld m, MonadIO m) => m ()
 updatePlayerAndCamera = do
-  Env {envCamRef, envPlayerRef, envCMRef} <- askEnv
+  Env {envCamRef, envPlayerRef} <- askEnv
   cam <- liftIO $ readIORef envCamRef
   let Camera _ front _ _ _ = cam
   dt <- do Env {envTimeRef} <- askEnv; liftIO $ updateTiming envTimeRef
   input <- do Env {envWin} <- askEnv; liftIO $ getKeyboardInput envWin
-  cm <- liftIO $ readIORef envCMRef
-  let blockAtW = blockQueryFromChunkMap (cmsLoadedChunks cm)
+  chunks <- getsWorldM cmsLoadedChunks
+  let blockAtW = queryBlockMaybe chunks
   liftIO $ modifyIORef' envPlayerRef $ stepPlayer blockAtW front input dt
   Player (V3 px py pz) _ <- liftIO $ readIORef envPlayerRef
   liftIO $ modifyIORef' envCamRef $ \(Camera _ f up pxy ppy) -> Camera (V3 px py (pz + playerEyeHeight)) f up pxy ppy
@@ -176,40 +196,31 @@ updateMouseState win clickStateRef = do
   writeIORef clickStateRef (lmb, rmb)
   pure (clickL, clickR)
 
-handleBlockBreak :: V3 Int -> AppM ()
-handleBlockBreak hit = do
-  Env {envCMRef} <- askEnv
-  cm <- liftIO $ readIORef envCMRef
-  -- Update block and rebuild mesh immediately via ChunkManager
-  (ok, cm') <- liftIO $ runChunkManager defaultChunkManagerConfig cm (setBlockAtWorld hit Air)
-  when ok $ liftIO $ writeIORef envCMRef cm'
+handleBlockBreak :: V3 Int -> GameM ()
+handleBlockBreak hit = void $ setBlockAtWorld hit Air
 
-handleBlockPlace :: V3 Int -> V3 Int -> AppM ()
+handleBlockPlace :: V3 Int -> V3 Int -> GameM ()
 handleBlockPlace hit normal = do
-  Env {envCMRef} <- askEnv
-  cm <- liftIO $ readIORef envCMRef
-  let chunks = cmsLoadedChunks cm
-      placePos = hit + normal
-  when (blockQueryFromChunkMap chunks placePos == Air) $ do
-    (ok, cm') <- liftIO $ runChunkManager defaultChunkManagerConfig cm (setBlockAtWorld placePos Stone)
-    when ok $ liftIO $ writeIORef envCMRef cm'
+  let placePos = hit + normal
+  -- TODO: Shouldn't this always be ==Air?
+  whenM ((== Air) <$> queryBlockWM placePos) (void $ setBlockAtWorld placePos Stone)
 
-handleMouseClicks :: AppM ()
+handleMouseClicks :: GameM ()
 handleMouseClicks = do
-  Env {envWin, envCamRef, envClickStateRef, envCMRef} <- askEnv
+  Env {envWin, envCamRef, envClickStateRef} <- askEnv
   (clickL, clickR) <- liftIO $ updateMouseState envWin envClickStateRef
   when (clickL || clickR) $ do
     Camera camPos camFront _ _ _ <- liftIO $ readIORef envCamRef
-    cm <- liftIO $ readIORef envCMRef
-    let chunks = cmsLoadedChunks cm
-    case raycastBlockData chunks camPos camFront C.interactionDistance of
-      Nothing -> pure ()
-      Just (hit, normal) ->
-        if clickL
-          then handleBlockBreak hit
-          else handleBlockPlace hit normal
+    chunks <- getsWorldM cmsLoadedChunks
+    whenJust
+      (raycastBlockData chunks camPos camFront C.interactionDistance)
+      ( \(hit, normal) ->
+          if clickL
+            then handleBlockBreak hit
+            else handleBlockPlace hit normal
+      )
 
-processInput :: AppM ()
+processInput :: GameM ()
 processInput = do
   updatePlayerAndCamera
   handleMouseClicks
@@ -246,7 +257,9 @@ setupOpenGL win aspectRef = do
         GL.viewport $= (GL.Position 0 0, GL.Size (fromIntegral w) (fromIntegral h))
         writeIORef aspectRef (if h == 0 then 1 else fromIntegral w / fromIntegral h)
     )
-
+  -- Disable blending by default, enable when needed
+  GL.blend $= GL.Disabled
+  GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
   GL.depthFunc $= Just GL.Lequal
   GL.clearDepth $= 1
   GL.frontFace $= GL.CCW
@@ -258,7 +271,8 @@ setupTerrainShader = do
   terrainProg <- loadTerrainProgram
   GL.currentProgram $= Just terrainProg
   [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff, uGrassColormap, uFoliageColormap] <-
-    mapM (GL.get . GL.uniformLocation terrainProg)
+    mapM
+      (GL.get . GL.uniformLocation terrainProg)
       ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas", "uAlphaCutoff", "uGrassColormap", "uFoliageColormap"]
 
   atlas <- createBlockTextureArray
@@ -383,19 +397,13 @@ setupUIShader = do
 
   pure (uiProg, uiTex, uiVAO, uiVBO, uUiTex, uAspect)
 
-initializeGameState :: Float -> Float -> GL.Color3 Float -> GL.UniformLocation -> GL.UniformLocation -> GL.UniformLocation -> IO (IORef ChunkManagerState)
+initializeGameState :: Float -> Float -> GL.Color3 Float -> GL.UniformLocation -> GL.UniformLocation -> GL.UniformLocation -> IO (IORef WorldState)
 initializeGameState fogStartVal fogEndVal fogColor uFogStart uFogEnd uFogColor = do
-  cmRef <- newIORef initialChunkManagerState
+  cmRef <- newIORef initialWorldState
 
   GL.uniform uFogStart $= fogStartVal
   GL.uniform uFogEnd $= fogEndVal
   GL.uniform uFogColor $= fogColor
-
-  let startCoord = chunkCoordOf (V3 32 32 50)
-      desired = [V2 (cx + dx) (cy + dy) | let V2 cx cy = startCoord, dx <- [-3 .. 3], dy <- [-3 .. 3]]
-  cmSeeded <- execChunkManager defaultChunkManagerConfig initialChunkManagerState $ do
-    mapM_ loadChunk desired
-  writeIORef cmRef cmSeeded
 
   pure cmRef
 
@@ -417,7 +425,7 @@ initializePlayerAndCamera win = do
 
   pure (camRef, playerRef, clickStateRef, timeRef, fpsRef, outlineEnabledRef, keyPrevRef)
 
-updateProjViewAllM :: AppM ()
+updateProjViewAllM :: (MonadEnv m, MonadIO m) => m ()
 updateProjViewAllM = do
   Env
     { envCamRef,
@@ -441,8 +449,8 @@ updateProjViewAllM = do
     GL.uniform rsUOutlineView $= vMat
     GL.currentProgram $= Just rsTerrainProg
 
-main :: IO ()
-main = do
+runGame :: IO ()
+runGame = do
   win <- initializeWindow
   aspect0 <- getWindowAspectRatio win
   aspectRef <- newIORef aspect0
@@ -454,7 +462,10 @@ main = do
   (uiProg, uiTex, uiVAO, uiVBO, uUiTex, uUiAspect) <- setupUIShader
   GL.currentProgram $= Just terrainProg
 
-  let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime, _, _, _) = uniforms
+  let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime, uAlphaCutoff, _, _) = uniforms
+  let workerCount = 3
+  cw <- startChunkWorkers workerCount generatedTerrian
+  let cmCfg = mkWorldConfig cw
   cmRef <- initializeGameState C.fogStart C.fogEnd C.fogColor uFogStart uFogEnd uFogColor
   (camRef, playerRef, clickStateRef, timeRef, fpsRef, outlineEnabledRef, keyPrevRef) <- initializePlayerAndCamera win
 
@@ -469,6 +480,7 @@ main = do
             envOutlineRef = outlineEnabledRef,
             envKeyPrevRef = keyPrevRef,
             envCMRef = cmRef,
+            envCMConfig = cmCfg,
             envAspectRef = aspectRef,
             envRender =
               RenderState
@@ -492,41 +504,45 @@ main = do
                   rsUIVAO = uiVAO,
                   rsUIVBO = uiVBO,
                   rsUUiTex = uUiTex,
-                  rsUUiAspect = uUiAspect
+                  rsUUiAspect = uUiAspect,
+                  rsUAlphaCutoff = uAlphaCutoff
                 }
           }
 
-  let drawFrame :: AppM ()
-      drawFrame = do
+  let drawFrameG :: GameM ()
+      drawFrameG = do
+        processInput
         Env {envPlayerRef} <- askEnv
         Player ppos _ <- liftIO $ readIORef envPlayerRef
-        processInput
         liftIO clearFrame
         drawSkyM
         updateProjViewAllM
         currentTime <- liftIO getCurrentTime
         Env {envRender = RenderState {rsUTime}} <- askEnv
         liftIO $ GL.uniform rsUTime $= (realToFrac currentTime :: GL.GLfloat)
-        Env {envCMRef} <- askEnv
-        cmState0 <- liftIO $ readIORef envCMRef
-        cmState1 <- liftIO $ execChunkManager defaultChunkManagerConfig cmState0 $ do
-          updatePlayerPosition ppos
-          updateChunks
-        liftIO $ writeIORef envCMRef cmState1
-        let chunksDraw = cmsLoadedChunks cmState1
-        liftIO $ drawWorldOpaque chunksDraw
-        liftIO $ drawWorldGrassOverlay chunksDraw
-        liftIO $ drawWorldLeaves chunksDraw
+
+        updatePlayerPosition ppos
+        updateChunks
+
+        chunksDraw <- loadedChunks
+
+        drawWorldOpaque chunksDraw
+        drawWorldGrassOverlay chunksDraw
+        drawWorldLeaves chunksDraw
         liftIO $ drawWorldWater chunksDraw
+        drawCrosshairUIM
+
         Env {envOutlineRef} <- askEnv
         outlineEnabled <- liftIO $ readIORef envOutlineRef
         when outlineEnabled drawBlockOutlineM
-        drawCrosshairUIM
+
         liftIO $ do
           GLFW.swapBuffers win
           GLFW.pollEvents
         updateFpsTitleM
 
+      drawFrame :: AppM ()
+      drawFrame = runGameM drawFrameG
       loopM :: AppM ()
       loopM = do
         drawFrame
@@ -537,91 +553,86 @@ main = do
   runAppM env loopM
   GLFW.terminate
 
+main :: IO ()
+main = runGame
+
 clearFrame :: IO ()
 clearFrame = do
   GL.clearColor $= GL.Color4 0.15 0.18 0.22 1.0
   GL.clear [GL.ColorBuffer, GL.DepthBuffer]
 
-drawWorldOpaque :: ChunkMap -> IO ()
-drawWorldOpaque chunks =
-  mapM_
-    ( \h -> do
-        GL.bindVertexArrayObject $= Just (cmVAO (chOpaque h))
-        GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chOpaque h)))
-    )
-    (M.elems chunks)
+-- Temporarily enable blend for the IO action
+withBlend :: (MonadIO m) => m a -> m ()
+withBlend a =
+  GL.blend $= GL.Enabled
+    >> GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
+    >> a
+    >> GL.blend $= GL.Disabled
+
+withoutFaceCull :: (MonadIO m) => m a -> m ()
+withoutFaceCull a = GL.cullFace $= Nothing >> a >> GL.cullFace $= Just GL.Back
+
+drawWorldOpaque :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
+drawWorldOpaque chunks = do
+  Env {envRender = RenderState {rsTerrainProg}} <- askEnv
+
+  GL.currentProgram $= Just rsTerrainProg
+
+  liftIO $
+    mapM_
+      ( \h -> do
+          let GpuMesh vao _ count = mOpaque (chMeshes h)
+          GL.bindVertexArrayObject $= Just vao
+          GL.drawArrays GL.Triangles 0 (fromIntegral count)
+      )
+      (M.elems chunks)
 
 drawWorldWater :: ChunkMap -> IO ()
-drawWorldWater chunks = do
-  GL.blend $= GL.Enabled
-  GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
+drawWorldWater chunks = withBlend $ do
   mapM_
     ( \h -> do
-      GL.bindVertexArrayObject $= Just (cmVAO (chWater h))
-      GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chWater h)))
+        let GpuMesh vao _ count = mWater (chMeshes h)
+        GL.bindVertexArrayObject $= Just vao
+        GL.drawArrays GL.Triangles 0 (fromIntegral count)
     )
     (M.elems chunks)
-  GL.blend $= GL.Disabled
 
-drawWorldLeaves :: ChunkMap -> IO ()
-drawWorldLeaves chunks = do
+drawWorldLeaves :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
+drawWorldLeaves chunks = withoutFaceCull $ do
   -- Alpha cutoff needs to be set here for transparent textures like leaves draw
   -- while still showing transparent textures in the same mesh behind them
-  -- Still do not quite understand the entire logic, but my OpenGL knowledge 
-  -- mostly comes from ChatGPT, so that might explain
-  GL.blend $= GL.Disabled
-  GL.cullFace $= Nothing
-  mprog1 <- GL.get GL.currentProgram
-  case mprog1 of
-    Just prog -> do
-      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
-      GL.uniform u $= (0.5 :: GL.GLfloat)
-    Nothing -> pure ()
-  mapM_
-    ( \h -> do
-        GL.bindVertexArrayObject $= Just (cmVAO (chLeaves h))
-        GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chLeaves h)))
-    )
-    (M.elems chunks)
-  mprog2 <- GL.get GL.currentProgram
-  case mprog2 of
-    Just prog -> do
-      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
-      GL.uniform u $= (0.0 :: GL.GLfloat)
-    Nothing -> pure ()
-  GL.cullFace $= Just GL.Back
-  GL.blend $= GL.Disabled
+  Env {envRender = RenderState {rsUAlphaCutoff}} <- askEnv
 
-drawWorldGrassOverlay :: ChunkMap -> IO ()
+  liftIO $ do
+    GL.uniform rsUAlphaCutoff $= (0.5 :: GL.GLfloat)
+    mapM_
+      ( \h -> do
+          let GpuMesh vao _ count = mLeaves (chMeshes h)
+          GL.bindVertexArrayObject $= Just vao
+          GL.drawArrays GL.Triangles 0 (fromIntegral count)
+      )
+      (M.elems chunks)
+    GL.uniform rsUAlphaCutoff $= (0.0 :: GL.GLfloat)
+
+drawWorldGrassOverlay :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
 drawWorldGrassOverlay chunks = do
-  GL.blend $= GL.Disabled
-  mprog1 <- GL.get GL.currentProgram
-  case mprog1 of
-    Just prog -> do
-      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
-      GL.uniform u $= (0.5 :: GL.GLfloat)
-    Nothing -> pure ()
-  mapM_
-    ( \h -> do
-        GL.bindVertexArrayObject $= Just (cmVAO (chGrassOverlay h))
-        GL.drawArrays GL.Triangles 0 (fromIntegral (cmCount (chGrassOverlay h)))
-    )
-    (M.elems chunks)
-  mprog2 <- GL.get GL.currentProgram
-  case mprog2 of
-    Just prog -> do
-      u <- GL.get $ GL.uniformLocation prog "uAlphaCutoff"
-      GL.uniform u $= (0.0 :: GL.GLfloat)
-    Nothing -> pure ()
+  Env {envRender = RenderState {rsUAlphaCutoff}} <- askEnv
 
-drawCrosshairUIM :: AppM ()
-drawCrosshairUIM = do
+  liftIO $ do
+    GL.uniform rsUAlphaCutoff $= (0.5 :: GL.GLfloat)
+    mapM_
+      ( \h -> do
+          let GpuMesh vao _ count = mGrassOverlay (chMeshes h)
+          GL.bindVertexArrayObject $= Just vao
+          GL.drawArrays GL.Triangles 0 (fromIntegral count)
+      )
+      (M.elems chunks)
+    GL.uniform rsUAlphaCutoff $= (0.0 :: GL.GLfloat)
+
+drawCrosshairUIM :: (MonadEnv m, MonadIO m) => m ()
+drawCrosshairUIM = withBlend $ do
   Env {envAspectRef, envRender = RenderState {rsUIProg, rsUITex, rsUIVAO, rsUUiTex, rsUUiAspect, rsTerrainProg}} <- askEnv
   liftIO $ do
-    GL.depthFunc $= Nothing
-    GL.blend $= GL.Enabled
-    GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
-
     GL.currentProgram $= Just rsUIProg
     GL.activeTexture $= GL.TextureUnit 1
     GL.textureBinding GL.Texture2D $= Just rsUITex
@@ -636,14 +647,12 @@ drawCrosshairUIM = do
     GL.bindVertexArrayObject $= Nothing
     GL.currentProgram $= Just rsTerrainProg
     GL.activeTexture $= GL.TextureUnit 0
-    GL.depthFunc $= Just GL.Lequal
-    GL.blend $= GL.Disabled
 
 generateBlockOutlineVertices :: ChunkMap -> V3 Int -> V3 Float -> [Float]
 generateBlockOutlineVertices chunkMap blk@(V3 x y z) camPos =
   let blkF@(V3 fx fy fz) = fromIntegral <$> blk
 
-      isBlockSolid pos = let b = blockQueryFromChunkMap chunkMap pos in b /= Air && blockOpaque b
+      isBlockSolid pos = let b = queryBlock chunkMap pos in b /= Air && blockOpaque b
 
       blockCenter = blkF + V3 0.5 0.5 0.5
       toCam = normalize (camPos - blockCenter)
@@ -686,12 +695,12 @@ generateBlockOutlineVertices chunkMap blk@(V3 x y z) camPos =
       backEdges = if showBack then loopEdges [p010, p011, p111, p110] else []
    in bottomEdges ++ topEdges ++ leftEdges ++ rightEdges ++ frontEdges ++ backEdges
 
-drawBlockOutlineM :: AppM ()
+drawBlockOutlineM :: (MonadEnv m, MonadIO m) => m ()
 drawBlockOutlineM = do
   Env
     { envCamRef,
       envCMRef,
-      envRender = RenderState {rsOutlineProg, rsOutlineVAO, rsOutlineVBO, rsTerrainProg}
+      envRender = RenderState {rsOutlineProg, rsOutlineVAO, rsOutlineVBO}
     } <-
     askEnv
   Camera camPos camFront _ _ _ <- liftIO $ readIORef envCamRef
@@ -707,16 +716,13 @@ drawBlockOutlineM = do
       withArray vertices $ \ptr -> do
         let bytes = (fromIntegral (length vertices * 4) :: GL.GLsizeiptr)
         GL.bufferSubData GL.ArrayBuffer GL.WriteToBuffer (0 :: GL.GLintptr) bytes ptr
-      GL.depthFunc $= Nothing
       GL.polygonMode $= (GL.Line, GL.Line)
       GL.lineWidth $= 2.0
       GL.drawArrays GL.Lines 0 (fromIntegral (length vertices `div` 3))
       GL.polygonMode $= (GL.Fill, GL.Fill)
-      GL.depthFunc $= Just GL.Lequal
-      GL.currentProgram $= Just rsTerrainProg
       GL.bindVertexArrayObject $= Nothing
 
-updateFpsTitleM :: AppM ()
+updateFpsTitleM :: (MonadEnv m, MonadIO m) => m ()
 updateFpsTitleM = do
   Env {envWin, envFpsRef, envPlayerRef} <- askEnv
   tNow <- liftIO getCurrentTime
@@ -734,15 +740,13 @@ updateFpsTitleM = do
       writeIORef envFpsRef (0, tNow)
     else liftIO $ writeIORef envFpsRef (fc', tStart)
 
-drawSkyM :: AppM ()
+drawSkyM :: (MonadEnv m, MonadIO m) => m ()
 drawSkyM = do
-  Env {envRender = RenderState {rsSkyProg, rsSkyVAO, rsSkyVBO, rsTerrainProg}} <- askEnv
+  Env {envRender = RenderState {rsSkyProg, rsSkyVAO, rsSkyVBO}} <- askEnv
   liftIO $ do
     GL.depthFunc $= Nothing
     GL.currentProgram $= Just rsSkyProg
     GL.bindVertexArrayObject $= Just rsSkyVAO
     GL.bindBuffer GL.ArrayBuffer $= Just rsSkyVBO
     GL.drawArrays GL.Triangles 0 6
-    GL.bindVertexArrayObject $= Nothing
-    GL.currentProgram $= Just rsTerrainProg
     GL.depthFunc $= Just GL.Lequal

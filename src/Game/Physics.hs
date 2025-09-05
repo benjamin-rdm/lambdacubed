@@ -9,51 +9,14 @@ module Game.Physics
     playerHalfWidth,
     playerHeight,
     gravityAccel,
-    walkSpeed,
-    jumpSpeed,
   )
 where
 
 import Game.World (Block (..), blockOpaque)
 import Linear hiding (nearZero)
 
-calculateBoundingBox :: V3 Float -> (V3 Float, V3 Float)
-calculateBoundingBox (V3 px py pz) =
-  ( V3 (px - playerHalfWidth) (py - playerHalfWidth) pz,
-    V3 (px + playerHalfWidth) (py + playerHalfWidth) (pz + playerHeight)
-  )
-
-checkCollision :: (V3 Int -> Block) -> (V3 Float, V3 Float) -> Bool
-checkCollision blockAtW (minP, maxP) =
-  let (V3 ix0 iy0 iz0) = floor <$> minP
-      (V3 ix1 iy1 iz1) = floor <$> maxP
-      isSolid ix iy iz = blockOpaque (blockAtW (V3 ix iy iz))
-   in or
-        [ isSolid ix iy iz
-          | ix <- [ix0 .. ix1],
-            iy <- [iy0 .. iy1],
-            iz <- [iz0 .. iz1]
-        ]
-
 normalizeVelocity :: V3 Float -> V3 Float
 normalizeVelocity wish = if nearZero wish then V3 0 0 0 else normalize wish
-
-calculateAxisMovement :: (V3 Int -> Block) -> Int -> Float -> V3 Float -> V3 Float
-calculateAxisMovement blockAtW axis delta pos0
-  | abs delta < 1e-8 = pos0
-  | otherwise =
-      let maxStep = 0.1 :: Float
-          stepsN = max 1 (ceiling (abs delta / maxStep) :: Int)
-          stepSz = delta / fromIntegral stepsN
-          moveOnce (V3 x y z) = case axis of
-            0 -> V3 (x + stepSz) y z
-            1 -> V3 x (y + stepSz) z
-            _ -> V3 x y (z + stepSz)
-          go 0 p = p
-          go n p =
-            let p' = moveOnce p
-             in if checkCollision blockAtW (calculateBoundingBox p') then p else go (n - 1) p'
-       in go stepsN pos0
 
 data InputState = InputState
   { inForward :: !Bool,
@@ -89,18 +52,42 @@ jumpSpeed :: Float
 jumpSpeed = 8.0
 
 playerBoundingBox :: V3 Float -> (V3 Float, V3 Float)
-playerBoundingBox = calculateBoundingBox
+playerBoundingBox (V3 px py pz) =
+  ( V3 (px - playerHalfWidth) (py - playerHalfWidth) pz,
+    V3 (px + playerHalfWidth) (py + playerHalfWidth) (pz + playerHeight)
+  )
 
-epsilon :: Float
-epsilon = 1e-4
-
-type BlockQuery = V3 Int -> Block
+-- Nothing here indicates that the block is not yet loaded.
+-- This is used in the physics module to not move the player in unloaded chunks.
+type BlockQuery = V3 Int -> Maybe Block
 
 collides :: BlockQuery -> (V3 Float, V3 Float) -> Bool
-collides = checkCollision
+collides blockAtW (minP, maxP) =
+  let (V3 ix0 iy0 iz0) = floor <$> minP
+      (V3 ix1 iy1 iz1) = floor <$> maxP
+   in any (isSolid blockAtW)
+        [ V3 ix iy iz
+          | ix <- [ix0 .. ix1],
+            iy <- [iy0 .. iy1],
+            iz <- [iz0 .. iz1]
+        ]
 
 slideAxis :: BlockQuery -> Int -> Float -> V3 Float -> V3 Float
-slideAxis = calculateAxisMovement
+slideAxis blockAtW axis delta pos0
+  | abs delta < 1e-8 = pos0
+  | otherwise =
+      let maxStep = 0.1 :: Float
+          stepsN = max 1 (ceiling (abs delta / maxStep) :: Int)
+          stepSz = delta / fromIntegral stepsN
+          moveOnce (V3 x y z) = case axis of
+            0 -> V3 (x + stepSz) y z
+            1 -> V3 x (y + stepSz) z
+            _ -> V3 x y (z + stepSz)
+          go 0 p = p
+          go n p =
+            let p' = moveOnce p
+             in if collides blockAtW (playerBoundingBox p') then p else go (n - 1) p'
+       in go stepsN pos0
 
 calculateWishDirection :: V3 Float -> InputState -> V3 Float
 calculateWishDirection camForward (InputState goF goB goL goR _) =
@@ -126,17 +113,10 @@ applyMovement blockAtW pos0 velocity dt =
       pos2 = slideAxis blockAtW 1 (vy * dt) pos1
    in slideAxis blockAtW 2 (vz * dt) pos2
 
-checkGroundCollision :: BlockQuery -> V3 Float -> Bool
-checkGroundCollision blockAtW pos3 =
-  let (V3 minX minY minZ, V3 maxX maxY _) = playerBoundingBox pos3
-      ix0 = floor minX
-      ix1 = floor (maxX - epsilon)
-      iy0 = floor minY
-      iy1 = floor (maxY - epsilon)
-      bz = floor (minZ - epsilon)
-   in any
-        (\(ix, iy) -> blockOpaque (blockAtW (V3 ix iy bz)))
-        [(ix, iy) | ix <- [ix0 .. ix1], iy <- [iy0 .. iy1]]
+-- We consider unloaded blocks to be solid to stop player movement
+-- in unloaded areas
+isSolid :: BlockQuery -> V3 Int -> Bool
+isSolid blockAtW v = maybe True blockOpaque (blockAtW v)
 
 stepPlayer :: BlockQuery -> V3 Float -> InputState -> Float -> Player -> Player
 stepPlayer blockAtW camForward inputState dt player0 =
@@ -152,7 +132,7 @@ stepPlayer blockAtW camForward inputState dt player0 =
 
       pos1 = applyMovement blockAtW pos0 (V3 vx vy vz) dt
 
-      onGroundAfter = checkGroundCollision blockAtW pos1
+      onGroundAfter = grounded blockAtW pos1
       vz' = if onGroundAfter && vz < 0 then 0 else vz
    in Player pos1 (V3 vx vy vz')
 

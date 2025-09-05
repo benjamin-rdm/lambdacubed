@@ -33,6 +33,7 @@ executable lambdacubed-exe
       Utils.PerlinNoise
       Utils.Monad
       Rendering.Texture
+      Rendering.Mesh
       Rendering.Shader.AST
       Rendering.Shader.Outline
       Rendering.Shader.Sky
@@ -42,9 +43,9 @@ executable lambdacubed-exe
       Rendering.Shader.UI
       Game.World
       Game.WorldManager
-      Game.WorldConfig
       Game.Physics
       Game.WorldSource
+      Game.ChunkWorkers
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2 -optlo-O3 -funbox-strict-fields -fexcess-precision
   build-depends:
       base
@@ -56,3 +57,9 @@ executable lambdacubed-exe
     , linear
     , containers
     , mtl
+    , transformers
+    , async
+    , stm
+    , deepseq
+    , mtl
+    , containers
