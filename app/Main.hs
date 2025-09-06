@@ -195,16 +195,16 @@ updateMouseState win clickStateRef = do
   writeIORef clickStateRef (lmb, rmb)
   pure (clickL, clickR)
 
-handleBlockBreak :: V3 Int -> GameM ()
+handleBlockBreak :: MonadWorld m => V3 Int -> m ()
 handleBlockBreak hit = void $ setBlockAtWorld hit Air
 
-handleBlockPlace :: V3 Int -> V3 Int -> GameM ()
+handleBlockPlace :: MonadWorld m => V3 Int -> V3 Int -> m ()
 handleBlockPlace hit normal = do
   let placePos = hit + normal
   -- TODO: Shouldn't this always be ==Air?
   whenM ((== Air) <$> blockAt placePos) (void $ setBlockAtWorld placePos Stone)
 
-handleMouseClicks :: GameM ()
+handleMouseClicks :: (MonadIO m, MonadWorld m, MonadEnv m) => m ()
 handleMouseClicks = do
   Env {envWin, envCamRef, envClickStateRef} <- askEnv
   (clickL, clickR) <- liftIO $ updateMouseState envWin envClickStateRef
@@ -218,7 +218,7 @@ handleMouseClicks = do
             else handleBlockPlace hit normal
       )
 
-processInput :: GameM ()
+processInput :: (MonadIO m, MonadWorld m, MonadEnv m) => m ()
 processInput = do
   updatePlayerAndCamera
   handleMouseClicks
