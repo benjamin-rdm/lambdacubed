@@ -10,19 +10,8 @@ module Game.WorldManager
     initialWorldState,
     chunkWorldOrigin,
     chunkCoordOf,
-    getBlockAtWorld,
-    setBlockAtWorld,
-    updatePlayerPosition,
-    prioritizeChunks,
-    updateChunks,
-    runWorld,
-    raycastBlockData,
-    queryBlock,
-    queryBlockMaybe,
-    queryBlockWM,
-    loadedChunks,
     MonadWorld (..),
-    getsWorldM,
+    runWorld,
   )
 where
 
@@ -32,7 +21,7 @@ import Control.Monad (filterM, replicateM)
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Data.Map.Strict qualified as M
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.Maybe (catMaybes)
 import Data.Set qualified as S
 import Data.Vector.Storable qualified as VS
 import Game.ChunkWorkers (ChunkWorkers (..), PreparedChunk (..), requestChunk, tryPopPrepared)
@@ -81,14 +70,13 @@ data WorldState = WorldState
   }
 
 class (Monad m) => MonadWorld m where
-  getWorld :: m WorldState
-
-getsWorldM :: (MonadWorld m) => (WorldState -> a) -> m a
-getsWorldM f = f <$> getWorld
-
-instance (Monad m) => MonadWorld (WorldT m) where
-  getWorld :: (Monad m) => WorldT m WorldState
-  getWorld = get
+  loadedChunks :: m ChunkMap
+  blockAtMaybe :: V3 Int -> m (Maybe Block)
+  blockAt :: V3 Int -> m Block
+  setBlockAtWorld :: V3 Int -> Block -> m Bool
+  updatePlayerPosition :: V3 Float -> m ()
+  updateChunks :: m ()
+  raycastBlock :: V3 Float -> V3 Float -> Float -> m (Maybe (V3 Int, V3 Int))
 
 type WorldT m = ReaderT WorldConfig (StateT WorldState m)
 
@@ -117,36 +105,88 @@ distanceToPlayer coord = do
   let playerChunk = chunkCoordOf playerPos
   pure $ calculateDistance coord playerChunk
 
-getBlockAtWorld :: (Monad m) => V3 Int -> WorldT m Block
-getBlockAtWorld pos = do
-  chunks <- loadedChunks
-  let cc = chunkCoordOf (fromIntegral <$> pos)
-      defaultBlock = Air
-  pure $ case M.lookup cc chunks of
-    Nothing -> defaultBlock
-    Just h -> blockAtV3 (chData h) pos
+instance (MonadIO m) => MonadWorld (WorldT m) where
+  loadedChunks :: WorldT m ChunkMap
+  loadedChunks = gets cmsLoadedChunks
 
-setBlockAtWorld :: (MonadIO m) => V3 Int -> Block -> WorldT m Bool
-setBlockAtWorld pos newBlock = do
-  chunks <- loadedChunks
-  let cc = chunkCoordOf (fromIntegral <$> pos)
-  case M.lookup cc chunks of
-    Nothing -> pure False
-    Just h -> do
-      case setBlockInChunk (chData h) pos newBlock of
-        Nothing -> pure False
-        Just newChunk -> do
-          -- Rebuild meshes for this chunk
-          let verts = buildTerrainVertices newChunk
-              wverts = buildWaterVertices newChunk
-              lverts = buildLeavesVertices newChunk
-              gverts = buildGrassOverlayVertices newChunk
-          -- Delete old meshes
-          deleteGpuMeshes (chMeshes h)
-          newGpuMesh <- liftIO $ uploadGpuMeshes (Mesh verts wverts lverts gverts)
-          let updatedHandle = h {chData = newChunk, chMeshes = newGpuMesh}
-          insertLoadedChunk cc updatedHandle
-          pure True
+  blockAtMaybe :: V3 Int -> WorldT m (Maybe Block)
+  blockAtMaybe pos = do
+    cm <- gets cmsLoadedChunks
+    let cc = chunkCoordOf (fromIntegral <$> pos)
+    pure (fmap (\h -> blockAtV3 (chData h) pos) (M.lookup cc cm))
+
+  blockAt :: V3 Int -> WorldT m Block
+  blockAt pos = do
+    cm <- gets cmsLoadedChunks
+    let cc = chunkCoordOf (fromIntegral <$> pos)
+    pure $ case M.lookup cc cm of
+      Nothing -> Air
+      Just h -> blockAtV3 (chData h) pos
+
+  setBlockAtWorld :: V3 Int -> Block -> WorldT m Bool
+  setBlockAtWorld pos newBlock = do
+    cm <- loadedChunks
+    let cc = chunkCoordOf (fromIntegral <$> pos)
+    case M.lookup cc cm of
+      Nothing -> pure False
+      Just h ->
+        case setBlockInChunk (chData h) pos newBlock of
+          Nothing -> pure False
+          Just newChunk -> do
+            let verts = buildTerrainVertices newChunk
+                wverts = buildWaterVertices newChunk
+                lverts = buildLeavesVertices newChunk
+                gverts = buildGrassOverlayVertices newChunk
+            deleteGpuMeshes (chMeshes h)
+            newGpuMesh <- liftIO $ uploadGpuMeshes (Mesh verts wverts lverts gverts)
+            let updatedHandle = h {chData = newChunk, chMeshes = newGpuMesh}
+            insertLoadedChunk cc updatedHandle
+            pure True
+
+  updatePlayerPosition :: V3 Float -> WorldT m ()
+  updatePlayerPosition pos = modify $ \s -> s {cmsPlayerPos = pos}
+
+  updateChunks :: WorldT m ()
+  updateChunks = do
+    desired <- getDesiredChunks
+    loaded <- gets (M.keys . cmsLoadedChunks)
+    let toLoad = filter (`notElem` loaded) desired
+        toUnload = filter (`notElem` desired) loaded
+    prioritizedToLoad <- prioritizeChunks toLoad
+    maxPerFrame <- asks cmcMaxChunksPerFrame
+    cw <- asks cmcWorkers
+    schedCandidates <- filterM (fmap not . isPending) prioritizedToLoad
+    let scheduled = take maxPerFrame schedCandidates
+    liftSTM $ mapM_ (requestChunk cw) scheduled
+    modify $ \s -> s {cmsPending = S.union (cmsPending s) (S.fromList scheduled)}
+    prepared <- liftSTM $ replicateM maxPerFrame (tryPopPrepared cw)
+    mapM_
+      ( \pc -> do
+          deletePendingChunk (pcCoord pc)
+          h <- liftIO $ finalizePrepared pc
+          insertLoadedChunk (pcCoord pc) h
+      )
+      (catMaybes prepared)
+    cs <- gets cmsLoadedChunks
+    mapM_ (unloadChunkHandle . (cs M.!)) (take maxPerFrame toUnload)
+
+  raycastBlock :: V3 Float -> V3 Float -> Float -> WorldT m (Maybe (V3 Int, V3 Int))
+  raycastBlock origin dirInput maxDist
+    | nearZero dirInput = pure Nothing
+    | otherwise = do
+        let dir = normalize dirInput
+            stepSize = 0.1 :: Float
+            steps = max 1 (floor (maxDist / stepSize))
+            startCell = floor <$> origin :: V3 Int
+            go _ _ i | i > steps = pure Nothing
+            go prevCell pos i = do
+              let pos' = pos + stepSize *^ dir
+                  cell' = floor <$> pos' :: V3 Int
+              b <- blockAt cell'
+              if b /= Air && blockOpaque b
+                then pure (Just (cell', entryNormal prevCell cell' dir))
+                else go cell' pos' (i + 1)
+        go startCell origin (0 :: Int)
 
 finalizePrepared :: PreparedChunk -> IO ChunkHandle
 finalizePrepared PreparedChunk {pcCoord, pcOrigin, pcTerrain, pcMeshes} = do
@@ -172,9 +212,6 @@ unloadChunkHandle :: (MonadIO m) => ChunkHandle -> WorldT m ()
 unloadChunkHandle (ChunkHandle coord _ _ mesh) = do
   deleteGpuMeshes mesh
   modify $ \s -> s {cmsLoadedChunks = M.delete coord (cmsLoadedChunks s)}
-
-updatePlayerPosition :: (Monad m) => V3 Float -> WorldT m ()
-updatePlayerPosition pos = modify $ \s -> s {cmsPlayerPos = pos}
 
 getDesiredChunks :: (MonadIO m) => WorldT m [V2 Int]
 getDesiredChunks = do
@@ -205,59 +242,9 @@ isPending v = do
   pending <- gets cmsPending
   return (v `S.member` pending)
 
-updateChunks :: (MonadIO m) => WorldT m ()
-updateChunks = do
-  desired <- getDesiredChunks
-  loaded <- gets (M.keys . cmsLoadedChunks)
-  {-
-  We store Pending chunks here to avoid adding the same chunk
-  to the queue for loading multiple times. So pending is just the queue after
-  this update plus the chunks that are currently being processed by workers.
-  This has some potential for optimization
-  -}
-  let toLoad = filter (`notElem` loaded) desired
-      toUnload = filter (`notElem` desired) loaded
-  prioritizedToLoad <- prioritizeChunks toLoad
-  maxPerFrame <- asks cmcMaxChunksPerFrame
-  cw <- asks cmcWorkers
-  schedCandidates <- filterM (fmap not . isPending) prioritizedToLoad
-  let scheduled = take maxPerFrame schedCandidates
-  liftSTM $ mapM_ (requestChunk cw) scheduled
-  modify $ \s -> s {cmsPending = S.union (cmsPending s) (S.fromList scheduled)}
-  prepared <- liftSTM $ replicateM maxPerFrame (tryPopPrepared cw)
-  mapM_
-    ( \pc -> do
-        deletePendingChunk (pcCoord pc)
-        h <- liftIO $ finalizePrepared pc
-        insertLoadedChunk (pcCoord pc) h
-    )
-    (catMaybes prepared)
-  cs <- loadedChunks
-  mapM_ (unloadChunkHandle . (cs M.!)) (take maxPerFrame toUnload)
-
 runWorld :: (MonadIO m) => WorldConfig -> WorldState -> WorldT m a -> m (a, WorldState)
 runWorld config initialState action =
   runStateT (runReaderT action config) initialState
-
-raycastBlockData :: ChunkMap -> V3 Float -> V3 Float -> Float -> Maybe (V3 Int, V3 Int)
-raycastBlockData cm origin dirInput maxDist
-  | nearZero dirInput = Nothing
-  | otherwise =
-      let dir = normalize dirInput
-          stepSize = 0.1 :: Float
-          steps :: Int
-          steps = max 1 (floor (maxDist / stepSize))
-          startCell = floor <$> origin :: V3 Int
-          isSolid v = let b = queryBlock cm v in b /= Air && blockOpaque b
-          go :: V3 Int -> V3 Float -> Int -> Maybe (V3 Int, V3 Int)
-          go _ _ i | i > steps = Nothing
-          go prevCell pos i =
-            let pos' = pos + stepSize *^ dir
-                cell' = floor <$> pos' :: V3 Int
-             in if isSolid cell'
-                  then Just (cell', entryNormal prevCell cell' dir)
-                  else go cell' pos' (i + 1)
-       in go startCell origin (0 :: Int)
 
 entryNormal :: V3 Int -> V3 Int -> V3 Float -> V3 Int
 entryNormal (V3 ax ay az) (V3 bx by bz) (V3 dx dy dz)
@@ -268,21 +255,5 @@ entryNormal (V3 ax ay az) (V3 bx by bz) (V3 dx dy dz)
   | abs dy >= abs dz = if dy > 0 then V3 0 (-1) 0 else V3 0 1 0
   | otherwise = if dz > 0 then V3 0 0 (-1) else V3 0 0 1
 
-queryBlock :: ChunkMap -> V3 Int -> Block
-queryBlock cm pos = fromMaybe Air (queryBlockMaybe cm pos)
-
-queryBlockMaybe :: ChunkMap -> V3 Int -> Maybe Block
-queryBlockMaybe cm pos =
-  let cc = chunkCoordOf (fromIntegral <$> pos)
-   in fmap (\h -> blockAtV3 (chData h) pos) (M.lookup cc cm)
-
 nearZero :: V3 Float -> Bool
 nearZero v = quadrance v < 1e-12
-
-queryBlockWM :: (Monad m) => V3 Int -> WorldT m Block
-queryBlockWM v = do
-  chunks <- loadedChunks
-  return (queryBlock chunks v)
-
-loadedChunks :: (Monad m) => WorldT m ChunkMap
-loadedChunks = gets cmsLoadedChunks

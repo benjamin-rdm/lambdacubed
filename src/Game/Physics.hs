@@ -12,8 +12,10 @@ module Game.Physics
   )
 where
 
-import Game.World (Block (..), blockOpaque)
+import Game.World (blockOpaque)
+import Game.WorldManager (MonadWorld (..))
 import Linear hiding (nearZero)
+import Utils.Monad (anyM)
 
 normalizeVelocity :: V3 Float -> V3 Float
 normalizeVelocity wish = if nearZero wish then V3 0 0 0 else normalize wish
@@ -57,25 +59,22 @@ playerBoundingBox (V3 px py pz) =
     V3 (px + playerHalfWidth) (py + playerHalfWidth) (pz + playerHeight)
   )
 
--- Nothing here indicates that the block is not yet loaded.
--- This is used in the physics module to not move the player in unloaded chunks.
-type BlockQuery = V3 Int -> Maybe Block
-
-collides :: BlockQuery -> (V3 Float, V3 Float) -> Bool
-collides blockAtW (minP, maxP) =
+collides :: (MonadWorld m) => (V3 Float, V3 Float) -> m Bool
+collides (minP, maxP) = do
   let (V3 ix0 iy0 iz0) = floor <$> minP
       (V3 ix1 iy1 iz1) = floor <$> maxP
-   in any (isSolid blockAtW)
-        [ V3 ix iy iz
-          | ix <- [ix0 .. ix1],
-            iy <- [iy0 .. iy1],
-            iz <- [iz0 .. iz1]
-        ]
+      cells = [V3 ix iy iz | ix <- [ix0 .. ix1], iy <- [iy0 .. iy1], iz <- [iz0 .. iz1]]
+  anyM isSolidM cells
 
-slideAxis :: BlockQuery -> Int -> Float -> V3 Float -> V3 Float
-slideAxis blockAtW axis delta pos0
-  | abs delta < 1e-8 = pos0
-  | otherwise =
+isSolidM :: (MonadWorld m) => V3 Int -> m Bool
+isSolidM v = do
+  mb <- blockAtMaybe v
+  pure (maybe True blockOpaque mb)
+
+slideAxis :: (MonadWorld m) => Int -> Float -> V3 Float -> m (V3 Float)
+slideAxis axis delta pos0
+  | abs delta < 1e-8 = pure pos0
+  | otherwise = do
       let maxStep = 0.1 :: Float
           stepsN = max 1 (ceiling (abs delta / maxStep) :: Int)
           stepSz = delta / fromIntegral stepsN
@@ -83,11 +82,12 @@ slideAxis blockAtW axis delta pos0
             0 -> V3 (x + stepSz) y z
             1 -> V3 x (y + stepSz) z
             _ -> V3 x y (z + stepSz)
-          go 0 p = p
-          go n p =
+          go 0 p = pure p
+          go n p = do
             let p' = moveOnce p
-             in if collides blockAtW (playerBoundingBox p') then p else go (n - 1) p'
-       in go stepsN pos0
+            coll <- collides (playerBoundingBox p')
+            if coll then pure p else go (n - 1) p'
+      go stepsN pos0
 
 calculateWishDirection :: V3 Float -> InputState -> V3 Float
 calculateWishDirection camForward (InputState goF goB goL goR _) =
@@ -106,40 +106,35 @@ calculateVerticalVelocity onGround wantJump velocity dt =
       vz1 = if onGround then vz0 else vz0 - gravityAccel * dt
    in if onGround && wantJump then jumpSpeed else vz1
 
-applyMovement :: BlockQuery -> V3 Float -> V3 Float -> Float -> V3 Float
-applyMovement blockAtW pos0 velocity dt =
+applyMovement :: (MonadWorld m) => V3 Float -> V3 Float -> Float -> m (V3 Float)
+applyMovement pos0 velocity dt = do
   let (V3 vx vy vz) = velocity
-      pos1 = slideAxis blockAtW 0 (vx * dt) pos0
-      pos2 = slideAxis blockAtW 1 (vy * dt) pos1
-   in slideAxis blockAtW 2 (vz * dt) pos2
+  pos1 <- slideAxis 0 (vx * dt) pos0
+  pos2 <- slideAxis 1 (vy * dt) pos1
+  slideAxis 2 (vz * dt) pos2
 
--- We consider unloaded blocks to be solid to stop player movement
--- in unloaded areas
-isSolid :: BlockQuery -> V3 Int -> Bool
-isSolid blockAtW v = maybe True blockOpaque (blockAtW v)
-
-stepPlayer :: BlockQuery -> V3 Float -> InputState -> Float -> Player -> Player
-stepPlayer blockAtW camForward inputState dt player0 =
+stepPlayer :: (MonadWorld m) => V3 Float -> InputState -> Float -> Player -> m Player
+stepPlayer camForward inputState dt player0 = do
   let pos0 = plPos player0
-      onGroundBefore = grounded blockAtW pos0
+  onGroundBefore <- grounded pos0
 
-      wish = calculateWishDirection camForward inputState
+  let wish = calculateWishDirection camForward inputState
       horiz = calculateHorizontalVelocity wish
 
       vx = horiz `dot` V3 1 0 0
       vy = horiz `dot` V3 0 1 0
       vz = calculateVerticalVelocity onGroundBefore (inJump inputState) (plVel player0) dt
 
-      pos1 = applyMovement blockAtW pos0 (V3 vx vy vz) dt
+  pos1 <- applyMovement pos0 (V3 vx vy vz) dt
 
-      onGroundAfter = grounded blockAtW pos1
-      vz' = if onGroundAfter && vz < 0 then 0 else vz
-   in Player pos1 (V3 vx vy vz')
+  onGroundAfter <- grounded pos1
+  let vz' = if onGroundAfter && vz < 0 then 0 else vz
+  pure (Player pos1 (V3 vx vy vz'))
 
 nearZero :: V3 Float -> Bool
 nearZero v = quadrance v < 1e-12
 
-grounded :: BlockQuery -> V3 Float -> Bool
-grounded blockAtW (V3 px py pz) =
+grounded :: (MonadWorld m) => V3 Float -> m Bool
+grounded (V3 px py pz) =
   let probe = 0.2 :: Float
-   in collides blockAtW (playerBoundingBox (V3 px py (pz - probe)))
+   in collides (playerBoundingBox (V3 px py (pz - probe)))

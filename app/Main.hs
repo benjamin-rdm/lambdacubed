@@ -179,9 +179,9 @@ updatePlayerAndCamera = do
   let Camera _ front _ _ _ = cam
   dt <- do Env {envTimeRef} <- askEnv; liftIO $ updateTiming envTimeRef
   input <- do Env {envWin} <- askEnv; liftIO $ getKeyboardInput envWin
-  chunks <- getsWorldM cmsLoadedChunks
-  let blockAtW = queryBlockMaybe chunks
-  liftIO $ modifyIORef' envPlayerRef $ stepPlayer blockAtW front input dt
+  player0 <- liftIO $ readIORef envPlayerRef
+  player1 <- stepPlayer front input dt player0
+  liftIO $ writeIORef envPlayerRef player1
   Player (V3 px py pz) _ <- liftIO $ readIORef envPlayerRef
   liftIO $ modifyIORef' envCamRef $ \(Camera _ f up pxy ppy) -> Camera (V3 px py (pz + playerEyeHeight)) f up pxy ppy
 
@@ -202,7 +202,7 @@ handleBlockPlace :: V3 Int -> V3 Int -> GameM ()
 handleBlockPlace hit normal = do
   let placePos = hit + normal
   -- TODO: Shouldn't this always be ==Air?
-  whenM ((== Air) <$> queryBlockWM placePos) (void $ setBlockAtWorld placePos Stone)
+  whenM ((== Air) <$> blockAt placePos) (void $ setBlockAtWorld placePos Stone)
 
 handleMouseClicks :: GameM ()
 handleMouseClicks = do
@@ -210,9 +210,8 @@ handleMouseClicks = do
   (clickL, clickR) <- liftIO $ updateMouseState envWin envClickStateRef
   when (clickL || clickR) $ do
     Camera camPos camFront _ _ _ <- liftIO $ readIORef envCamRef
-    chunks <- getsWorldM cmsLoadedChunks
-    whenJust
-      (raycastBlockData chunks camPos camFront C.interactionDistance)
+    whenJustM
+      (raycastBlock camPos camFront C.interactionDistance)
       ( \(hit, normal) ->
           if clickL
             then handleBlockBreak hit
@@ -647,13 +646,11 @@ drawCrosshairUIM = withBlend $ do
     GL.currentProgram $= Just rsTerrainProg
     GL.activeTexture $= GL.TextureUnit 0
 
-generateBlockOutlineVertices :: ChunkMap -> V3 Int -> V3 Float -> [Float]
-generateBlockOutlineVertices chunkMap blk@(V3 x y z) camPos =
+generateBlockOutlineVerticesM :: (MonadWorld m) => V3 Int -> V3 Float -> m [Float]
+generateBlockOutlineVerticesM blk@(V3 x y z) camPos = do
   let blkF@(V3 fx fy fz) = fromIntegral <$> blk
 
-      isBlockSolid pos = let b = queryBlock chunkMap pos in b /= Air && blockOpaque b
-
-      blockCenter = blkF + V3 0.5 0.5 0.5
+  let blockCenter = blkF + V3 0.5 0.5 0.5
       toCam = normalize (camPos - blockCenter)
       faceFacingCamera normal = toCam `dot` normal > 0
 
@@ -679,12 +676,20 @@ generateBlockOutlineVertices chunkMap blk@(V3 x y z) camPos =
       frontN = V3 0 (-1) 0
       backN = V3 0 1 0
 
-      showBottom = not (isBlockSolid (V3 x y (z - 1))) && faceFacingCamera bottomN
-      showTop = not (isBlockSolid (V3 x y (z + 1))) && faceFacingCamera topN
-      showLeft = not (isBlockSolid (V3 (x - 1) y z)) && faceFacingCamera leftN
-      showRight = not (isBlockSolid (V3 (x + 1) y z)) && faceFacingCamera rightN
-      showFront = not (isBlockSolid (V3 x (y - 1) z)) && faceFacingCamera frontN
-      showBack = not (isBlockSolid (V3 x (y + 1) z)) && faceFacingCamera backN
+  bBottom <- blockAt (V3 x y (z - 1))
+  bTop <- blockAt (V3 x y (z + 1))
+  bLeft <- blockAt (V3 (x - 1) y z)
+  bRight <- blockAt (V3 (x + 1) y z)
+  bFront <- blockAt (V3 x (y - 1) z)
+  bBack <- blockAt (V3 x (y + 1) z)
+
+  let solid b = b /= Air && blockOpaque b
+      showBottom = not (solid bBottom) && faceFacingCamera bottomN
+      showTop = not (solid bTop) && faceFacingCamera topN
+      showLeft = not (solid bLeft) && faceFacingCamera leftN
+      showRight = not (solid bRight) && faceFacingCamera rightN
+      showFront = not (solid bFront) && faceFacingCamera frontN
+      showBack = not (solid bBack) && faceFacingCamera backN
 
       bottomEdges = if showBottom then loopEdges [p100, p000, p010, p110] else []
       topEdges = if showTop then loopEdges [p001, p101, p111, p011] else []
@@ -692,34 +697,34 @@ generateBlockOutlineVertices chunkMap blk@(V3 x y z) camPos =
       rightEdges = if showRight then loopEdges [p100, p101, p111, p110] else []
       frontEdges = if showFront then loopEdges [p000, p001, p101, p100] else []
       backEdges = if showBack then loopEdges [p010, p011, p111, p110] else []
-   in bottomEdges ++ topEdges ++ leftEdges ++ rightEdges ++ frontEdges ++ backEdges
 
-drawBlockOutlineM :: (MonadEnv m, MonadIO m) => m ()
+  pure (bottomEdges ++ topEdges ++ leftEdges ++ rightEdges ++ frontEdges ++ backEdges)
+
+drawBlockOutlineM :: (MonadEnv m, MonadWorld m, MonadIO m) => m ()
 drawBlockOutlineM = do
   Env
     { envCamRef,
-      envCMRef,
       envRender = RenderState {rsOutlineProg, rsOutlineVAO, rsOutlineVBO}
     } <-
     askEnv
   Camera camPos camFront _ _ _ <- liftIO $ readIORef envCamRef
-  cm <- liftIO $ readIORef envCMRef
-  let chunks = cmsLoadedChunks cm
-  case raycastBlockData chunks camPos camFront C.interactionDistance of
-    Nothing -> pure ()
-    Just (hitPos, _) -> liftIO $ do
-      let vertices = generateBlockOutlineVertices chunks hitPos camPos
-      GL.currentProgram $= Just rsOutlineProg
-      GL.bindVertexArrayObject $= Just rsOutlineVAO
-      GL.bindBuffer GL.ArrayBuffer $= Just rsOutlineVBO
-      withArray vertices $ \ptr -> do
-        let bytes = (fromIntegral (length vertices * 4) :: GL.GLsizeiptr)
-        GL.bufferSubData GL.ArrayBuffer GL.WriteToBuffer (0 :: GL.GLintptr) bytes ptr
-      GL.polygonMode $= (GL.Line, GL.Line)
-      GL.lineWidth $= 2.0
-      GL.drawArrays GL.Lines 0 (fromIntegral (length vertices `div` 3))
-      GL.polygonMode $= (GL.Fill, GL.Fill)
-      GL.bindVertexArrayObject $= Nothing
+  whenJustM
+    (raycastBlock camPos camFront C.interactionDistance)
+    ( \(hitPos, _) -> do
+        vertices <- generateBlockOutlineVerticesM hitPos camPos
+        liftIO $ do
+          GL.currentProgram $= Just rsOutlineProg
+          GL.bindVertexArrayObject $= Just rsOutlineVAO
+          GL.bindBuffer GL.ArrayBuffer $= Just rsOutlineVBO
+          withArray vertices $ \ptr -> do
+            let bytes = (fromIntegral (length vertices * 4) :: GL.GLsizeiptr)
+            GL.bufferSubData GL.ArrayBuffer GL.WriteToBuffer (0 :: GL.GLintptr) bytes ptr
+          GL.polygonMode $= (GL.Line, GL.Line)
+          GL.lineWidth $= 2.0
+          GL.drawArrays GL.Lines 0 (fromIntegral (length vertices `div` 3))
+          GL.polygonMode $= (GL.Fill, GL.Fill)
+          GL.bindVertexArrayObject $= Nothing
+    )
 
 updateFpsTitleM :: (MonadEnv m, MonadIO m) => m ()
 updateFpsTitleM = do
