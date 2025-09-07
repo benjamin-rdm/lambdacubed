@@ -22,13 +22,12 @@ module Game.World
 where
 
 import App.Config (chunkSize)
-import Control.Monad (when)
+import Control.Monad (foldM, foldM_)
 import Control.Monad.Reader
 import Control.Monad.ST (ST)
 import Control.Monad.State (State, execState, modify)
 import Data.IntMap.Strict qualified as IM
 import Data.Maybe
-import Data.STRef
 import Data.Vector.Storable qualified as VS
 import Data.Vector.Storable.Mutable qualified as VSM
 import Data.Word (Word8)
@@ -398,13 +397,6 @@ writeFace mv off v1 v2 v3 v4 layer (t, h) = do
   i1 <- writeTriangle off v1 (0, 0) v2 (1, 0) v3 (1, 1)
   writeTriangle i1 v1 (0, 0) v3 (1, 1) v4 (0, 1)
 
--- Helper function to keep index in STRef
-emitFace :: VSM.MVector s Float -> Data.STRef.STRef s Int -> V3 Float -> V3 Float -> V3 Float -> V3 Float -> Float -> (Float, Float) -> ST s ()
-emitFace mv indexRef v1 v2 v3 v4 layer climate = do
-  index <- Data.STRef.readSTRef indexRef
-  index' <- writeFace mv index v1 v2 v3 v4 layer climate
-  Data.STRef.writeSTRef indexRef index'
-
 faceCorners :: (Real a) => V3 a -> TextureDirection -> (V3 Float, V3 Float, V3 Float, V3 Float)
 faceCorners (V3 x y z) dir =
   let f a b c = realToFrac <$> V3 a b c
@@ -440,23 +432,24 @@ buildTerrainVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
       floatsPerFace = 6 * 8
       totalFloats = countFaces * floatsPerFace
   mv <- VSM.new totalFloats
-  offRef <- Data.STRef.newSTRef 0
-  let writeDir worldPosI block dir = do
-        when (faceVisible worldPosI dir) $ do
-          let (v1, v2, v3, v4) = faceCorners worldPosI dir
-              layer = case (block, dir) of
-                (Grass, NegX) -> 3
-                (Grass, PosX) -> 3
-                (Grass, NegY) -> 3
-                (Grass, PosY) -> 3
-                _ -> textureLayerOf block dir
-          emitFace mv offRef v1 v2 v3 v4 layer defaultClimate
-  mapM_
-    ( \worldPosI ->
-        let block = blockAtV3 chunk worldPosI
-         in when (blockOpaque block) $ mapM_ (writeDir worldPosI block) dirs
-    )
-    positions
+  let stepDir worldPosI block off dir =
+        if faceVisible worldPosI dir
+          then
+            let (v1, v2, v3, v4) = faceCorners worldPosI dir
+                layer = case (block, dir) of
+                  (Grass, NegX) -> 3
+                  (Grass, PosX) -> 3
+                  (Grass, NegY) -> 3
+                  (Grass, PosY) -> 3
+                  _ -> textureLayerOf block dir
+             in writeFace mv off v1 v2 v3 v4 layer defaultClimate
+          else pure off
+      stepPos off p =
+        let block = blockAtV3 chunk p
+         in if blockOpaque block
+              then foldM (stepDir p block) off dirs
+              else pure off
+  foldM_ stepPos 0 positions
   pure mv
 
 -- Render water slightly below the surface of the block
@@ -476,19 +469,18 @@ buildWaterVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
       floatsPerFace = 6 * 8
       totalFloats = countFaces * floatsPerFace
   mv <- VSM.new totalFloats
-  indexRef <- Data.STRef.newSTRef 0
   let dir = PosZ
-  mapM_
-    ( \worldPosI ->
-        when (qualifies worldPosI) $ do
-          let offsetWorldPos = (fromIntegral <$> worldPosI) - V3 0 0 waterLevelOffset
-              (v1, v2, v3, v4) = faceCorners offsetWorldPos dir
-              (v5, v6, v7, v8) = faceCorners offsetWorldPos (invertTextureDirection dir)
-              layer = textureLayerOf Water dir
-          emitFace mv indexRef v1 v2 v3 v4 layer defaultClimate
-          emitFace mv indexRef v5 v6 v7 v8 layer defaultClimate
-    )
-    positions
+      step off worldPosI =
+        if qualifies worldPosI
+          then do
+            let offsetWorldPos = (fromIntegral <$> worldPosI) - V3 0 0 waterLevelOffset
+                (v1, v2, v3, v4) = faceCorners offsetWorldPos dir
+                (v5, v6, v7, v8) = faceCorners offsetWorldPos (invertTextureDirection dir)
+                layer = textureLayerOf Water dir
+            off' <- writeFace mv off v1 v2 v3 v4 layer defaultClimate
+            writeFace mv off' v5 v6 v7 v8 layer defaultClimate
+          else pure off
+  foldM_ step 0 positions
   pure mv
 
 buildLeavesVertices :: TerrainChunk -> VS.Vector Float
@@ -502,21 +494,17 @@ buildLeavesVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
       floatsPerFace = 6 * 8
       totalFloats = countFaces * floatsPerFace
   mv <- VSM.new totalFloats
-  indexRef <- Data.STRef.newSTRef 0
-  mapM_
-    ( \worldPosI ->
-        when (isLeaves worldPosI) $
-          mapM_
-            ( \dir -> do
-                let (v1, v2, v3, v4) = faceCorners worldPosI dir
-                    (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
-                    layer = textureLayerOf OakLeaves dir
-                emitFace mv indexRef v1 v2 v3 v4 layer (0.8, 0.4)
-                emitFace mv indexRef v5 v6 v7 v8 layer (0.8, 0.4)
-            )
-            dirs
-    )
-    positions
+  let writePair worldPosI off dir = do
+        let (v1, v2, v3, v4) = faceCorners worldPosI dir
+            (v5, v6, v7, v8) = faceCorners worldPosI (invertTextureDirection dir)
+            layer = textureLayerOf OakLeaves dir
+        off' <- writeFace mv off v1 v2 v3 v4 layer (0.8, 0.4)
+        writeFace mv off' v5 v6 v7 v8 layer (0.8, 0.4)
+      stepPos off p =
+        if isLeaves p
+          then foldM (writePair p) off dirs
+          else pure off
+  foldM_ stepPos 0 positions
   pure mv
 
 buildGrassOverlayVertices :: TerrainChunk -> VS.Vector Float
@@ -534,19 +522,17 @@ buildGrassOverlayVertices chunk@(TerrainChunk chunkOrigin _) = VS.create $ do
       floatsPerFace = 6 * 8
       totalFloats = countFaces * floatsPerFace
   mv <- VSM.new totalFloats
-  indexRef <- Data.STRef.newSTRef 0
-  mapM_
-    ( \worldPosI ->
-        when (blockAtV3 chunk worldPosI == Grass) $
-          mapM_
-            ( \dir ->
-                when (faceVisible worldPosI dir) $ do
-                  let (v1, v2, v3, v4) = faceCorners worldPosI dir
-                  emitFace mv indexRef v1 v2 v3 v4 4 defaultClimate
-            )
-            dirs
-    )
-    positions
+  let stepDir worldPosI off dir =
+        if faceVisible worldPosI dir
+          then
+            let (v1, v2, v3, v4) = faceCorners worldPosI dir
+             in writeFace mv off v1 v2 v3 v4 4 defaultClimate
+          else pure off
+      stepPos off p =
+        if blockAtV3 chunk p == Grass
+          then foldM (stepDir p) off dirs
+          else pure off
+  foldM_ stepPos 0 positions
   pure mv
 
 data GpuMesh = GpuMesh

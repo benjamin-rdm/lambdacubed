@@ -1,65 +1,76 @@
-cabal-version:      3.8
-name:               lambdacubed
-version:            0.1.0.0
-description:        See README.md
-license:            BSD-3-Clause
-license-file:       LICENSE
-author:             Benjamin Riedemann
-maintainer:         benjamin.riedemann@rwth-aachen.de
-homepage:           https://github.com/benjamin-rdm/lambdacubed#readme
-bug-reports:        https://github.com/benjamin-rdm/lambdacubed/issues
-category:           Game
-build-type:         Simple
+cabal-version: 3.8
+name: lambdacubed
+version: 0.1.0.0
+description: See README.md
+license: BSD-3-Clause
+license-file: LICENSE
+author: Benjamin Riedemann
+maintainer: benjamin.riedemann@rwth-aachen.de
+homepage: https://github.com/benjamin-rdm/lambdacubed#readme
+bug-reports: https://github.com/benjamin-rdm/lambdacubed/issues
+category: Game
+build-type: Simple
 extra-source-files:
-  README.md
   ChangeLog.md
+  README.md
 
 tested-with:
-  GHC == 9.6.* || == 9.8.* || == 9.10.*
+  ghc ==9.6.* || ==9.8.* || ==9.10.*
 
 common common-opts
   default-language: GHC2021
   ghc-options:
-    -Wall -Wcompat -Wunused-packages -Werror -fspecialise-aggressively -fstatic-argument-transformation
+    -Wall
+    -Wcompat
+    -Wunused-packages
+    -Werror
+    -fspecialise-aggressively
+    -fstatic-argument-transformation
+    -threaded
+    -rtsopts
+    -with-rtsopts=-N
+    -O2
+    -optlo-O3
 
 executable lambdacubed-exe
-  import:         common-opts
-  hs-source-dirs: app src
-  main-is:        Main.hs
+  import: common-opts
+  hs-source-dirs:
+    app
+    src
+
+  main-is: Main.hs
   other-modules:
-      App.Config
-      Rendering.Camera
-      Utils.Math
-      Utils.PerlinNoise
-      Utils.Monad
-      Rendering.Texture
-      Rendering.Mesh
-      Rendering.Shader.AST
-      Rendering.Shader.Outline
-      Rendering.Shader.Sky
-      Rendering.Shader.Terrain
-      Rendering.Shader.Typed
-      Rendering.Shader.Utils
-      Rendering.Shader.UI
-      Game.World
-      Game.WorldManager
-      Game.Physics
-      Game.WorldSource
-      Game.ChunkWorkers
-  ghc-options: -threaded -rtsopts -with-rtsopts=-N -O2 -optlo-O3 -funbox-strict-fields -fexcess-precision
+    App.Config
+    Game.ChunkWorkers
+    Game.Physics
+    Game.World
+    Game.WorldManager
+    Game.WorldSource
+    Rendering.Camera
+    Rendering.Mesh
+    Rendering.Shader.AST
+    Rendering.Shader.Outline
+    Rendering.Shader.Sky
+    Rendering.Shader.Terrain
+    Rendering.Shader.Typed
+    Rendering.Shader.UI
+    Rendering.Shader.Utils
+    Rendering.Texture
+    Utils.Math
+    Utils.Monad
+    Utils.PerlinNoise
+
   build-depends:
-      base
-    , OpenGL
-    , GLFW-b
-    , bytestring
-    , JuicyPixels
-    , vector
-    , linear
-    , containers
-    , mtl
-    , transformers
-    , async
-    , stm
-    , deepseq
-    , mtl
-    , containers
+    GLFW-b,
+    JuicyPixels,
+    OpenGL,
+    async,
+    base,
+    bytestring,
+    containers,
+    deepseq,
+    linear,
+    mtl,
+    stm,
+    transformers,
+    vector,

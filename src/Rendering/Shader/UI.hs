@@ -3,14 +3,10 @@ module Rendering.Shader.UI
   )
 where
 
-import Data.ByteString.Char8 qualified as BS8
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Rendering.Shader.AST
 import Rendering.Shader.Typed
 import Rendering.Shader.Utils
-
-toSrc :: ShaderSource -> BS8.ByteString
-toSrc = BS8.pack . ppr
 
 uiVertexAST :: ShaderSource
 uiVertexAST = runVertexT $ do

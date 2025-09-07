@@ -1,8 +1,12 @@
 module Rendering.Shader.AST where
 
+import Data.ByteString.Char8 qualified as BS8
 import Data.Foldable
 import Data.List (intercalate)
 import Data.List.NonEmpty qualified as NE
+
+toSrc :: ShaderSource -> BS8.ByteString
+toSrc = BS8.pack . ppr
 
 data Datatype
   = V2

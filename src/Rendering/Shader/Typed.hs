@@ -40,6 +40,13 @@ import Rendering.Shader.AST
 
 newtype Name (t :: Datatype) = Name {nStr :: String}
 
+{-
+TODO: Investigate if there is actual value in having this typed AST. 
+Alternative approach: Wrap values of untyped AST in a newtype with a type-level (OpenGL-)type parameter
+This would heavily reduce the code duplication and since we can already enforce some invariants
+only via the "smart" constructors and not the GADT itself (see below), this might provide the 
+same effective type safety in the OpenGL EDSL.
+-}
 data TypedExpr (t :: Datatype) where
   TypedVar :: Name t -> TypedExpr t
   TypedLitF :: Double -> TypedExpr 'FloatT
@@ -47,10 +54,7 @@ data TypedExpr (t :: Datatype) where
   TypedVec2 :: [Expr] -> TypedExpr 'V2
   TypedVec3 :: [Expr] -> TypedExpr 'V3
   TypedVec4 :: [Expr] -> TypedExpr 'V4
-  -- These constructors for swizzles do not actually NEED the constraint, as we
-  -- do not use them directly
-  -- Constructors for Vectors can violate the constraint as well if not
-  -- used through the vec{2,3,4}-alias
+  -- We have no nice way of enforcing the type safetly of Vector constructors in the Typed AST
   TypedSwizzleX :: (1 <= Len t) => TypedExpr t -> TypedExpr 'FloatT
   TypedSwizzleY :: (2 <= Len t) => TypedExpr t -> TypedExpr 'FloatT
   TypedSwizzleZ :: (3 <= Len t) => TypedExpr t -> TypedExpr 'FloatT

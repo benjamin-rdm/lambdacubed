@@ -647,12 +647,12 @@ drawCrosshairUIM = withBlend $ do
     GL.activeTexture $= GL.TextureUnit 0
 
 generateBlockOutlineVerticesM :: (MonadWorld m) => V3 Int -> V3 Float -> m [Float]
-generateBlockOutlineVerticesM blk@(V3 x y z) camPos = do
+generateBlockOutlineVerticesM blk camPos = do
   let blkF@(V3 fx fy fz) = fromIntegral <$> blk
 
   let blockCenter = blkF + V3 0.5 0.5 0.5
       toCam = normalize (camPos - blockCenter)
-      faceFacingCamera normal = toCam `dot` normal > 0
+      faceFacingCamera normal = toCam `dot` (realToFrac <$> normal) > 0
 
       p000 = V3 fx fy fz
       p100 = V3 (fx + 1) fy fz
@@ -676,12 +676,12 @@ generateBlockOutlineVerticesM blk@(V3 x y z) camPos = do
       frontN = V3 0 (-1) 0
       backN = V3 0 1 0
 
-  bBottom <- blockAt (V3 x y (z - 1))
-  bTop <- blockAt (V3 x y (z + 1))
-  bLeft <- blockAt (V3 (x - 1) y z)
-  bRight <- blockAt (V3 (x + 1) y z)
-  bFront <- blockAt (V3 x (y - 1) z)
-  bBack <- blockAt (V3 x (y + 1) z)
+  bBottom <- blockAt (bottomN + blk)
+  bTop <- blockAt (topN + blk)
+  bLeft <- blockAt (leftN + blk)
+  bRight <- blockAt (rightN + blk)
+  bFront <- blockAt (frontN + blk)
+  bBack <- blockAt (backN + blk)
 
   let solid b = b /= Air && blockOpaque b
       showBottom = not (solid bBottom) && faceFacingCamera bottomN
