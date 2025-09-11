@@ -46,8 +46,6 @@ type ResourceId = Text
 
 type BlockFace = (Block, Direction)
 
-type RidIndexMap = M.Map ResourceId Int
-
 data BlockMeta = BlockMeta
   { bmModelPath :: !(Maybe FilePath),
     bmExtraTextures :: ![ResourceId]
@@ -57,20 +55,29 @@ data BlockMeta = BlockMeta
 blockRegistry :: M.Map Block BlockMeta
 blockRegistry =
   M.fromList
-    [ (Dirt, BlockMeta (Just "resource_pack/assets/minecraft/models/block/dirt.json") []),
-      (Grass, BlockMeta (Just "resource_pack/assets/minecraft/models/block/grass_block.json") []),
-      (Stone, BlockMeta (Just "resource_pack/assets/minecraft/models/block/stone.json") []),
-      (Gravel, BlockMeta (Just "resource_pack/assets/minecraft/models/block/gravel.json") []),
-      (OakLog, BlockMeta (Just "resource_pack/assets/minecraft/models/block/oak_log.json") []),
-      (OakLeaves, BlockMeta (Just "resource_pack/assets/minecraft/models/block/oak_leaves.json") []),
+    [ (Dirt, BlockMeta (Just (atModelPath "dirt.json")) []),
+      (Grass, BlockMeta (Just (atModelPath "grass_block.json")) []),
+      (Stone, BlockMeta (Just (atModelPath "stone.json")) []),
+      (Gravel, BlockMeta (Just (atModelPath "gravel.json")) []),
+      (OakLog, BlockMeta (Just (atModelPath "oak_log.json")) []),
+      (OakLeaves, BlockMeta (Just (atModelPath "oak_leaves.json")) []),
       (Water, BlockMeta Nothing ["minecraft:block/water_still_blue"]),
       (Air, BlockMeta Nothing [])
     ]
 
+texturePath :: FilePath
+texturePath = "resource_pack/assets/minecraft/textures/"
+
+modelPath :: FilePath
+modelPath = "resource_pack/assets/minecraft/models/block/"
+
+atModelPath :: FilePath -> FilePath
+atModelPath = (modelPath <>)
+
 resIdToPath :: Text -> FilePath
 resIdToPath rid =
-  let noNs = fromMaybe rid (T.stripPrefix "minecraft:" rid)
-   in "resource_pack/assets/minecraft/textures/" ++ T.unpack noNs ++ ".png"
+  let strippedName = fromMaybe rid (T.stripPrefix "minecraft:" rid)
+   in texturePath ++ T.unpack strippedName ++ ".png"
 
 resolveFaceTexture :: M.Map Text Text -> Text -> Maybe Text
 resolveFaceTexture texMap = go
@@ -80,7 +87,7 @@ resolveFaceTexture texMap = go
       | otherwise = Just t
 
 faceLayersOf :: BlockModel -> M.Map Direction (ResourceId, Bool)
-faceLayersOf bm = M.fromListWith const [(d, (rid, isOv)) | (d, rid, isOv, _) <- facesInfo bm]
+faceLayersOf bm = M.fromList [(d, (rid, isOv)) | (d, rid, isOv, _) <- facesInfo bm]
 
 facesInfo :: BlockModel -> [(Direction, ResourceId, Bool, Maybe Int)]
 facesInfo (BlockModel _ texMap els) = concatMap perElement els
@@ -98,8 +105,8 @@ facesInfo (BlockModel _ texMap els) = concatMap perElement els
 modelPathForBlock :: Block -> Maybe FilePath
 modelPathForBlock b = bmModelPath =<< M.lookup b blockRegistry
 
-extraTexturesForBlock :: Block -> [ResourceId]
-extraTexturesForBlock b = maybe [] bmExtraTextures (M.lookup b blockRegistry)
+extraTexturesForBlock :: Block -> S.Set ResourceId
+extraTexturesForBlock b = S.fromList $ maybe [] bmExtraTextures (M.lookup b blockRegistry)
 
 loadBlockModels :: [Block] -> IO [(Block, Maybe BlockModel)]
 loadBlockModels bs = forM bs $ \b -> case modelPathForBlock b of
@@ -112,19 +119,17 @@ loadBlockModels bs = forM bs $ \b -> case modelPathForBlock b of
       Right m -> (b, Just m)
 
 perBlockFacesFromModels :: [(Block, Maybe BlockModel)] -> [(Block, M.Map Direction (ResourceId, Bool))]
-perBlockFacesFromModels models =
-  [(b, faceLayersOf m) | (b, Just m) <- models]
+perBlockFacesFromModels models = [(b, faceLayersOf m) | (b, Just m) <- models]
 
 allResourceIds :: [(Block, M.Map Direction (ResourceId, Bool))] -> S.Set ResourceId
 allResourceIds perBlockFaces =
-  let faceIds = [rid | (_, faces) <- perBlockFaces, (rid, _) <- M.elems faces]
-      extraIds = concatMap extraTexturesForBlock [minBound .. maxBound]
-   in S.fromList (faceIds ++ extraIds)
+  let faceIds = foldMap (S.fromList . map fst . M.elems . snd) perBlockFaces
+      extraIds = foldMap extraTexturesForBlock [minBound .. maxBound]
+   in faceIds `S.union` extraIds
 
 loadResId :: Text -> IO (Text, [Image PixelRGBA8])
 loadResId rid = do
-  let path = resIdToPath rid
-  img <- loadImage path
+  img <- loadImage (resIdToPath rid)
   pure (rid, extractSpriteFrames img)
 
 loadFramesAndIndex :: (Foldable f) => f Text -> IO (M.Map Text Int, M.Map Text Int, [Image PixelRGBA8])
@@ -141,7 +146,7 @@ loadFramesAndIndex rids = buildMaps 0 M.empty M.empty [] <$> traverse loadResId 
             (reverse frames ++ acc)
             rest
 
-buildLayerMaps :: [(Block, M.Map Direction (ResourceId, Bool))] -> RidIndexMap -> (M.Map BlockFace Int, M.Map BlockFace Int, S.Set Int)
+buildLayerMaps :: [(Block, M.Map Direction (ResourceId, Bool))] -> M.Map ResourceId Int -> (M.Map BlockFace Int, M.Map BlockFace Int, S.Set Int)
 buildLayerMaps perBlockFaces ridIndexMap =
   (M.fromList baseLayerAssocs, M.fromList overlayLayerAssocs, S.fromList overlayIndices)
   where
@@ -163,7 +168,7 @@ buildLayerMaps perBlockFaces ridIndexMap =
 tintedBaseRids :: BlockModel -> S.Set ResourceId
 tintedBaseRids bm = S.fromList [rid | (_, rid, isOv, mTint) <- facesInfo bm, not isOv, isJust mTint]
 
-computeTintSets :: [Maybe BlockModel] -> RidIndexMap -> (S.Set Int, S.Set Int)
+computeTintSets :: [Maybe BlockModel] -> M.Map ResourceId Int -> (S.Set Int, S.Set Int)
 computeTintSets models ridIndexMap = (grassIdxs, foliageIdxs)
   where
     baseIndex rid = M.lookup rid ridIndexMap
