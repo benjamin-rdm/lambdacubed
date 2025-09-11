@@ -1,8 +1,11 @@
 module Rendering.Texture
-  ( createBlockTextureArray,
-    loadTextureFromPng,
+  ( loadTextureFromPng,
     setupTextureMode,
     extractSpriteFrames,
+    Image,
+    PixelRGBA8,
+    loadImage,
+    createTextureArrayFromImages
   )
 where
 
@@ -11,24 +14,11 @@ import Data.Vector.Storable qualified as V
 import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 
-defaultBlockTexturePaths :: [FilePath]
-defaultBlockTexturePaths =
-  [ "resource_pack/assets/minecraft/textures/block/grass_block_top.png",
-    "resource_pack/assets/minecraft/textures/block/gravel.png",
-    "resource_pack/assets/minecraft/textures/block/stone.png",
-    "resource_pack/assets/minecraft/textures/block/dirt.png",
-    "resource_pack/assets/minecraft/textures/block/grass_block_side_overlay.png",
-    "resource_pack/assets/minecraft/textures/block/water_still_blue.png",
-    "resource_pack/assets/minecraft/textures/block/oak_log_top.png",
-    "resource_pack/assets/minecraft/textures/block/oak_log.png",
-    "resource_pack/assets/minecraft/textures/block/oak_leaves.png"
-  ]
-
 convertImageToRGBA :: DynamicImage -> Image PixelRGBA8
 convertImageToRGBA = convertRGBA8
 
-loadImageSafe :: FilePath -> IO (Image PixelRGBA8)
-loadImageSafe path = do
+loadImage :: FilePath -> IO (Image PixelRGBA8)
+loadImage path = do
   result <- readPng path
   case result of
     Right dynImg -> pure $ convertImageToRGBA dynImg
@@ -77,51 +67,33 @@ createTextureObject = GL.genObjectName
 bindTextureToTarget :: GL.TextureTarget3D -> GL.TextureObject -> IO ()
 bindTextureToTarget target tex = GL.textureBinding target $= Just tex
 
-blockTextureSources :: [FilePath]
-blockTextureSources = defaultBlockTexturePaths
-
 extractSpriteFrames :: Image PixelRGBA8 -> [Image PixelRGBA8]
 extractSpriteFrames img@(Image width height pixels) =
   let frameHeight = 16
    in if width == 16 && height > 16 && height `mod` 16 == 0
         then
-          let numFrames = min 16 (height `div` frameHeight) -- Limit to 16 frames max
+          let numFrames = min 16 (height `div` frameHeight)
            in [ Image width frameHeight (V.slice (frame * width * frameHeight * 4) (width * frameHeight * 4) pixels)
                 | frame <- [0 .. numFrames - 1]
               ]
         else [img]
 
-loadTexturesFromPng :: [FilePath] -> IO ()
-loadTexturesFromPng filenames = do
-  results <-
-    mapM
-      ( \filename -> do
-          img <- loadImageSafe filename
-          let frames = extractSpriteFrames img
-          pure frames
-      )
-      filenames
-
-  let allTextures = concat results
-  case allTextures of
-    [] -> fail "No textures loaded"
-    _ -> setupTexture3D GL.Texture2DArray allTextures
-
 loadTextureFromPng :: FilePath -> IO ()
 loadTextureFromPng filename = do
-  image <- loadImageSafe filename
+  image <- loadImage filename
   setupTexture2D GL.Texture2D image
 
 setupTextureMode :: (GL.ParameterizedTextureTarget a) => a -> IO ()
 setupTextureMode = configureTextureParameters
 
-createBlockTextureArray :: IO GL.TextureObject
-createBlockTextureArray = do
+
+createTextureArrayFromImages :: [Image PixelRGBA8] -> IO GL.TextureObject
+createTextureArrayFromImages imgs = do
   tex <- createTextureObject
   GL.activeTexture $= GL.TextureUnit 0
   GL.texture GL.Texture2DArray $= GL.Enabled
   bindTextureToTarget GL.Texture2DArray tex
   configureTextureParameters GL.Texture2DArray
-  loadTexturesFromPng blockTextureSources
+  setupTexture3D GL.Texture2DArray imgs
   GL.generateMipmap GL.Texture2DArray $= GL.Enabled
   pure tex

@@ -11,6 +11,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
 import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (nullPtr, plusPtr)
+import Game.Block.Atlas (Atlas (..), SpecialIndices (..), buildBlockAtlas)
 import Game.ChunkWorkers
 import Game.Physics
 import Game.World
@@ -22,38 +23,14 @@ import Graphics.UI.GLFW qualified as GLFW
 import Linear
 import Rendering.Camera
 import Rendering.Mesh (Mesh (..))
+import Rendering.Render (AtlasIndex (..), MonadRender (..), RenderState (..))
 import Rendering.Shader.Outline (loadOutlineProgram)
 import Rendering.Shader.Sky (loadSkyProgram)
-import Rendering.Shader.Terrain (loadTerrainProgram)
+import Rendering.Shader.Terrain (loadTerrainProgramWith)
 import Rendering.Shader.UI (loadUIProgram)
-import Rendering.Texture (createBlockTextureArray, loadTextureFromPng, setupTextureMode)
+import Rendering.Texture (loadTextureFromPng, setupTextureMode)
 import Utils.Math (toGLMatrix)
 import Utils.Monad
-
-data RenderState = RenderState
-  { rsTerrainProg :: !GL.Program,
-    rsUView :: !GL.UniformLocation,
-    rsUProj :: !GL.UniformLocation,
-    rsUFogColor :: !GL.UniformLocation,
-    rsUFogStart :: !GL.UniformLocation,
-    rsUFogEnd :: !GL.UniformLocation,
-    rsUTime :: !GL.UniformLocation,
-    rsSkyProg :: !GL.Program,
-    rsSkyVAO :: !GL.VertexArrayObject,
-    rsSkyVBO :: !GL.BufferObject,
-    rsOutlineProg :: !GL.Program,
-    rsOutlineVAO :: !GL.VertexArrayObject,
-    rsOutlineVBO :: !GL.BufferObject,
-    rsUOutlineView :: !GL.UniformLocation,
-    rsUOutlineProj :: !GL.UniformLocation,
-    rsUIProg :: !GL.Program,
-    rsUITex :: !GL.TextureObject,
-    rsUIVAO :: !GL.VertexArrayObject,
-    rsUIVBO :: !GL.BufferObject,
-    rsUUiTex :: !GL.UniformLocation,
-    rsUUiAspect :: !GL.UniformLocation,
-    rsUAlphaCutoff :: !GL.UniformLocation
-  }
 
 data Env = Env
   { envWin :: !GLFW.Window,
@@ -95,6 +72,12 @@ instance MonadEnv AppM where
 instance MonadEnv GameM where
   askEnv :: GameM Env
   askEnv = lift . lift $ askEnv
+
+instance MonadRender AppM where
+  askRender :: AppM RenderState
+  askRender = do
+    Env {envRender} <- askEnv
+    pure envRender
 
 runAppM :: Env -> AppM a -> IO a
 runAppM env act = runReaderT (unAppM act) env
@@ -195,10 +178,10 @@ updateMouseState win clickStateRef = do
   writeIORef clickStateRef (lmb, rmb)
   pure (clickL, clickR)
 
-handleBlockBreak :: MonadWorld m => V3 Int -> m ()
+handleBlockBreak :: (MonadWorld m) => V3 Int -> m ()
 handleBlockBreak hit = void $ setBlockAtWorld hit Air
 
-handleBlockPlace :: MonadWorld m => V3 Int -> V3 Int -> m ()
+handleBlockPlace :: (MonadWorld m) => V3 Int -> V3 Int -> m ()
 handleBlockPlace hit normal = do
   let placePos = hit + normal
   -- TODO: Shouldn't this always be ==Air?
@@ -255,7 +238,6 @@ setupOpenGL win aspectRef = do
         GL.viewport $= (GL.Position 0 0, GL.Size (fromIntegral w) (fromIntegral h))
         writeIORef aspectRef (if h == 0 then 1 else fromIntegral w / fromIntegral h)
     )
-  -- Disable blending by default, enable when needed
   GL.blend $= GL.Disabled
   GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
   GL.depthFunc $= Just GL.Lequal
@@ -264,18 +246,17 @@ setupOpenGL win aspectRef = do
   GL.cullFace $= Just GL.Back
   GL.multisample $= GL.Enabled
 
-setupTerrainShader :: IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
-setupTerrainShader = do
-  terrainProg <- loadTerrainProgram
+setupTerrainShader :: SpecialIndices -> GL.TextureObject -> IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
+setupTerrainShader spec atlasTex = do
+  terrainProg <- loadTerrainProgramWith spec
   GL.currentProgram $= Just terrainProg
   [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff, uGrassColormap, uFoliageColormap] <-
     mapM
       (GL.get . GL.uniformLocation terrainProg)
       ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas", "uAlphaCutoff", "uGrassColormap", "uFoliageColormap"]
 
-  atlas <- createBlockTextureArray
   GL.activeTexture $= GL.TextureUnit 0
-  GL.textureBinding GL.Texture2DArray $= Just atlas
+  GL.textureBinding GL.Texture2DArray $= Just atlasTex
   GL.uniform uAtlas $= GL.TextureUnit 0
 
   grassCM <- GL.genObjectName
@@ -296,7 +277,6 @@ setupTerrainShader = do
   GL.generateMipmap GL.Texture2D $= GL.Enabled
   GL.uniform uFoliageColormap $= GL.TextureUnit 3
 
-  -- We set alpha cutoff to 0.0 as the default behavior
   GL.uniform uAlphaCutoff $= (0.0 :: GL.GLfloat)
   pure (terrainProg, (uView, uProj, uFogColor, uFogStart, uFogEnd, uAtlas, uTime, uAlphaCutoff, uGrassColormap, uFoliageColormap))
 
@@ -454,7 +434,9 @@ runGame = do
   aspectRef <- newIORef aspect0
   setupOpenGL win aspectRef
 
-  (terrainProg, uniforms) <- setupTerrainShader
+  Atlas {atTexture = atlasTex, atLayerOf = layerOf, atOverlayOf = overlayOf, atSpecial = spec} <- buildBlockAtlas
+  let atlasIndex = AtlasIndex {aiLayerOf = layerOf, aiOverlayOf = overlayOf}
+  (terrainProg, uniforms) <- setupTerrainShader spec atlasTex
   (skyProg, skyVAO, skyVBO) <- setupSkyShader
   (outlineProg, outlineVAO, outlineVBO, uOutlineView, uOutlineProj) <- setupOutlineShader
   (uiProg, uiTex, uiVAO, uiVBO, uUiTex, uUiAspect) <- setupUIShader
@@ -462,7 +444,9 @@ runGame = do
 
   let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime, uAlphaCutoff, _, _) = uniforms
   let workerCount = 3
-  cw <- startChunkWorkers workerCount generatedTerrian
+      texOfF b d = realToFrac (layerOf b d) :: Float
+      overlayOfF b d = realToFrac <$> overlayOf b d :: Maybe Float
+  cw <- startChunkWorkers workerCount generatedTerrian texOfF overlayOfF
   let cmCfg = mkWorldConfig cw
   cmRef <- initializeGameState C.fogStart C.fogEnd C.fogColor uFogStart uFogEnd uFogColor
   (camRef, playerRef, clickStateRef, timeRef, fpsRef, outlineEnabledRef, keyPrevRef) <- initializePlayerAndCamera win
@@ -503,7 +487,9 @@ runGame = do
                   rsUIVBO = uiVBO,
                   rsUUiTex = uUiTex,
                   rsUUiAspect = uUiAspect,
-                  rsUAlphaCutoff = uAlphaCutoff
+                  rsUAlphaCutoff = uAlphaCutoff,
+                  rsAtlasTex = atlasTex,
+                  rsAtlasIndex = atlasIndex
                 }
           }
 
@@ -525,7 +511,7 @@ runGame = do
         chunksDraw <- loadedChunks
 
         drawWorldOpaque chunksDraw
-        drawWorldGrassOverlay chunksDraw
+        drawWorldOverlays chunksDraw
         drawWorldLeaves chunksDraw
         liftIO $ drawWorldWater chunksDraw
         drawCrosshairUIM
@@ -612,8 +598,8 @@ drawWorldLeaves chunks = withoutFaceCull $ do
       (M.elems chunks)
     GL.uniform rsUAlphaCutoff $= (0.0 :: GL.GLfloat)
 
-drawWorldGrassOverlay :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
-drawWorldGrassOverlay chunks = do
+drawWorldOverlays :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
+drawWorldOverlays chunks = do
   Env {envRender = RenderState {rsUAlphaCutoff}} <- askEnv
 
   liftIO $ do

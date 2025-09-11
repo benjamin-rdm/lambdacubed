@@ -26,6 +26,7 @@ import Data.Set qualified as S
 import Data.Vector.Storable qualified as VS
 import Game.ChunkWorkers (ChunkWorkers (..), PreparedChunk (..), requestChunk, tryPopPrepared)
 import Game.World
+import Rendering.Render (MonadRender(..))
 import Game.WorldSource
 import Linear hiding (nearZero)
 import Rendering.Mesh (Mesh (..))
@@ -59,7 +60,6 @@ data WorldConfig = WorldConfig
   { cmcRenderDistance :: !Int,
     cmcMaxChunksPerFrame :: !Int,
     cmcWorldSource :: !WorldSource,
-    -- This feels more like state, but we only need to read this
     cmcWorkers :: !ChunkWorkers
   }
 
@@ -105,7 +105,16 @@ distanceToPlayer coord = do
   let playerChunk = chunkCoordOf playerPos
   pure $ calculateDistance coord playerChunk
 
-instance (MonadIO m) => MonadWorld (WorldT m) where
+instance (MonadRender m) => MonadRender (WorldT m) where
+  askRender = lift . lift $ askRender
+
+{-
+TODO
+This MonadRender constraint is BAD. MonadWorld should just be about
+game data, not need to rebuild the mesh on the GPU and require UI-specific code.
+Maybe return the chunk to update here and handle at caller
+-}
+instance (MonadIO m, MonadRender m) => MonadWorld (WorldT m) where
   loadedChunks :: WorldT m ChunkMap
   loadedChunks = gets cmsLoadedChunks
 
@@ -133,10 +142,12 @@ instance (MonadIO m) => MonadWorld (WorldT m) where
         case setBlockInChunk (chData h) pos newBlock of
           Nothing -> pure False
           Just newChunk -> do
-            let verts = buildTerrainVertices newChunk
-                wverts = buildWaterVertices newChunk
-                lverts = buildLeavesVertices newChunk
-                gverts = buildGrassOverlayVertices newChunk
+            texOf <- atlasTexOf
+            overlayOf <- atlasOverlayOf
+            let verts = buildTerrainVertices texOf newChunk
+                wverts = buildWaterVertices texOf newChunk
+                lverts = buildLeavesVertices texOf newChunk
+                gverts = buildOverlayVertices overlayOf newChunk
             deleteGpuMeshes (chMeshes h)
             newGpuMesh <- liftIO $ uploadGpuMeshes (Mesh verts wverts lverts gverts)
             let updatedHandle = h {chData = newChunk, chMeshes = newGpuMesh}
