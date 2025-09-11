@@ -53,7 +53,7 @@ terrainFragmentAST spec = runFragmentT $ do
   clim <- localV2 "clim" (Just (vec2 (subF (1.0 :: Double) (use t), subF (1.0 :: Double) (mulF (use h) (use t)))))
 
   let applyTint tint = do
-        grassTint <- localV3 "grassTint" (Just (rgb (texture2D tint (use clim))))
+        grassTint <- localV3 "tint" (Just (rgb (texture2D tint (use clim))))
         assignN base (vec4 (rgb (use base) .*. use grassTint, a (use base)))
 
   let applyOverlay = do
