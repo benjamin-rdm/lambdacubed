@@ -1,8 +1,7 @@
-module Rendering.Shader.Terrain
-  ( loadTerrainProgram,
-  )
-where
+module Rendering.Shader.Terrain (loadTerrainProgramWith) where
 
+import Data.Set qualified as S
+import Game.Block.Atlas (SpecialIndices (..))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Rendering.Shader.AST
 import Rendering.Shader.Typed
@@ -24,8 +23,8 @@ terrainVertexAST = runVertexT $ do
   assignN vFogDist (length3 (xyz posVS))
   assignGLPosition (use uProj .*. posVS)
 
-terrainFragmentAST :: ShaderSource
-terrainFragmentAST = runFragmentT $ do
+terrainFragmentAST :: SpecialIndices -> ShaderSource
+terrainFragmentAST spec = runFragmentT $ do
   vTC <- inV3 "vTC"
   vClimate <- inV2 "vClimate"
   vFogDist <- inF "vFogDist"
@@ -41,12 +40,10 @@ terrainFragmentAST = runFragmentT $ do
 
   texCoord <- localV3 "texCoord" (Just (use vTC))
 
-  -- These magic numbers in the indices will be resolved, when
-  -- we automatically generate the shader from minecraft block data files
-
-  -- water animation if z == 5.0
-  let newZ = addF (5.0 :: Double) (floorF (modF (mulF (use uTime) (4.0 :: Double)) (16.0 :: Double)))
-  ifT (z (use texCoord) .==. (5.0 :: Double)) $ do
+  let waterBase = fromIntegral (siWaterBase spec) :: Double
+      waterFrames = fromIntegral (siWaterFrames spec) :: Double
+      newZ = addF waterBase (floorF (modF (mulF (use uTime) (4.0 :: Double)) waterFrames))
+  ifT (z (use texCoord) .==. waterBase) $ do
     assignN texCoord (vec3 (xy (use texCoord), newZ))
 
   base <- localV4 "base" (Just (texture2DArray uAtlas (use texCoord)))
@@ -55,23 +52,25 @@ terrainFragmentAST = runFragmentT $ do
   h <- localF "h" (Just (clamp01 (y (use vClimate))))
   clim <- localV2 "clim" (Just (vec2 (subF (1.0 :: Double) (use t), subF (1.0 :: Double) (mulF (use h) (use t)))))
 
-  -- grass tint if z == 0.0
-  ifT (z (use texCoord) .==. (0.0 :: Double)) $ do
-    grassTint <- localV3 "grassTint" (Just (rgb (texture2D uGrass (use clim))))
-    assignN base (vec4 (rgb (use base) .*. use grassTint, a (use base)))
+  let applyTint tint = do
+        grassTint <- localV3 "grassTint" (Just (rgb (texture2D tint (use clim))))
+        assignN base (vec4 (rgb (use base) .*. use grassTint, a (use base)))
 
-  -- foliage tint if z == 23.0
-  ifT (z (use texCoord) .==. (23.0 :: Double)) $ do
-    foliageTint <- localV3 "foliageTint" (Just (rgb (texture2D uFoliage (use clim))))
-    assignN base (vec4 (rgb (use base) .*. use foliageTint, a (use base)))
+  let applyOverlay = do
+        overlay <- localV4 "overlay" (Just (texture2DArray uAtlas (use texCoord)))
+        grassIntensity <- localF "grassIntensity" (Just (x (rgb (use overlay))))
+        ifT (ltF (use grassIntensity) (0.1 :: Double)) discardT
+        grassTint <- localV3 "grassTint" (Just (rgb (texture2D uGrass (use clim))))
+        assignN base (vec4 (rgb (use base) .*. use grassTint, 1.0 :: Double))
 
-  -- grass overlay if == 4.0
-  ifT (z (use texCoord) .==. (4.0 :: Double)) $ do
-    overlay <- localV4 "overlay" (Just (texture2DArray uAtlas (use texCoord)))
-    grassIntensity <- localF "grassIntensity" (Just (x (rgb (use overlay))))
-    ifT (ltF (use grassIntensity) (0.1 :: Double)) discardT
-    grassTint <- localV3 "grassTint" (Just (rgb (texture2D uGrass (use clim))))
-    assignN base (vec4 (rgb (use base) .*. use grassTint, 1.0 :: Double))
+  let grassIdxs = S.map (fromIntegral :: Int -> Double) (siTintGrassIndices spec)
+  mapM_ (\idx -> ifT (z (use texCoord) .==. idx) (applyTint uGrass)) grassIdxs
+
+  let foliageIdxs = S.map (fromIntegral :: Int -> Double) (siTintFoliageIndices spec)
+  mapM_ (\idx -> ifT (z (use texCoord) .==. idx) (applyTint uFoliage)) foliageIdxs
+  
+  let overlayIdxs = S.map (fromIntegral :: Int -> Double) (siOverlayIndices spec)
+  mapM_ (\idx -> ifT (z (use texCoord) .==. idx) applyOverlay) overlayIdxs
 
   ifT (ltF (a (use base)) (use uAlphaCutoff)) discardT
 
@@ -79,8 +78,8 @@ terrainFragmentAST = runFragmentT $ do
   rgbCol <- localV3 "rgb" (Just (mixV3 (rgb (use base)) (use uFogColor) (use fog)))
   assignN frag (vec4 (use rgbCol, a (use base)))
 
-loadTerrainProgram :: IO GL.Program
-loadTerrainProgram = do
+loadTerrainProgramWith :: SpecialIndices -> IO GL.Program
+loadTerrainProgramWith spec = do
   let vsrc = toSrc terrainVertexAST
-      fsrc = toSrc terrainFragmentAST
+      fsrc = toSrc (terrainFragmentAST spec)
   loadProgramFromSources vsrc fsrc

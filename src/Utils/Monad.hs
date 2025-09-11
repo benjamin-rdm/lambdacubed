@@ -1,6 +1,6 @@
 module Utils.Monad where
 
-import Control.Monad (unless, when)
+import Control.Monad (when)
 import Data.Foldable ( for_ )
 import Data.List (sortOn)
 
@@ -22,10 +22,6 @@ whenM x a = do
   xv <- x
   when xv a
 
-unlessM :: (Monad m) => m Bool -> m () -> m ()
-unlessM x a = do
-  xv <- x
-  unless xv a
 
 whenJust :: Applicative f => Maybe t -> (t -> f ()) -> f ()
 whenJust Nothing _ = pure ()
