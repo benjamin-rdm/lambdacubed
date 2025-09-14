@@ -19,24 +19,6 @@ import Control.Monad.Writer.Strict
 import Data.Functor (($>))
 import GHC.TypeNats (Nat, type (+), type (<=))
 import Rendering.Shader.AST
-  ( BinOp (Add, Div, Eq, Le, Lt, Mul, Sub),
-    Datatype
-      ( BoolT,
-        FloatT,
-        IntT,
-        Mat4,
-        Sampler2D,
-        Sampler2DArray,
-        V2,
-        V3,
-        V4
-      ),
-    Expr (BinOp, Call, Constructor, Field, LitFloat, LitInt, Var),
-    Function (Function, sfArgs, sfBody, sfName, sfType),
-    ShaderSource (..),
-    ShaderType (..),
-    Statement (Assign, Decl, Discard, If),
-  )
 
 newtype Name (t :: Datatype) = Name {nStr :: String}
 

@@ -63,12 +63,14 @@ terrainFragmentAST spec = runFragmentT $ do
         grassTint <- localV3 "grassTint" (Just (rgb (texture2D uGrass (use clim))))
         assignN base (vec4 (rgb (use base) .*. use grassTint, 1.0 :: Double))
 
+  -- TODO: Generate one if with "or" for different indices?
+  -- Performance should not be impacted, but maybe the code would be a bit nicer.
   let grassIdxs = S.map (fromIntegral :: Int -> Double) (siTintGrassIndices spec)
   mapM_ (\idx -> ifT (z (use texCoord) .==. idx) (applyTint uGrass)) grassIdxs
 
   let foliageIdxs = S.map (fromIntegral :: Int -> Double) (siTintFoliageIndices spec)
   mapM_ (\idx -> ifT (z (use texCoord) .==. idx) (applyTint uFoliage)) foliageIdxs
-  
+
   let overlayIdxs = S.map (fromIntegral :: Int -> Double) (siOverlayIndices spec)
   mapM_ (\idx -> ifT (z (use texCoord) .==. idx) applyOverlay) overlayIdxs
 

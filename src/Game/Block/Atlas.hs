@@ -11,7 +11,7 @@ import Control.Monad
 import Data.Foldable
 import Data.List (partition)
 import Data.Map.Strict qualified as M
-import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 import Data.Set qualified as S
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -21,18 +21,19 @@ import Game.World (Block (..))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Rendering.Texture
 
+-- This is passed to the shader code generator for it to generate the correct handling of special textures
 data SpecialIndices = SpecialIndices
-  { siWaterBase :: !Int,
-    siWaterFrames :: !Int,
-    siTintGrassIndices :: !(S.Set Int),
-    siTintFoliageIndices :: !(S.Set Int),
-    siOverlayIndices :: !(S.Set Int)
+  { siWaterBase :: !Int, -- Base texture for the water sprite
+    siWaterFrames :: !Int, -- Number of frames for the water sprite
+    siTintGrassIndices :: !(S.Set Int), -- Texture indices that should get the grass tint applied
+    siTintFoliageIndices :: !(S.Set Int), -- Same for foliage
+    siOverlayIndices :: !(S.Set Int) -- Textures used as overlays
   }
 
 data Atlas = Atlas
   { atTexture :: !GL.TextureObject,
-    atLayerOf :: Block -> Direction -> Int,
-    atOverlayOf :: Block -> Direction -> Maybe Int,
+    atLayerOf :: Block -> Direction -> Int, -- Base layer index for a block face
+    atOverlayOf :: Block -> Direction -> Maybe Int, -- Overlay for block face
     atSpecial :: !SpecialIndices
   }
 
@@ -51,7 +52,6 @@ data BlockMeta = BlockMeta
     bmExtraTextures :: ![ResourceId]
   }
 
--- TODO: Should this just be a function instead of a Map?
 blockRegistry :: M.Map Block BlockMeta
 blockRegistry =
   M.fromList
@@ -136,14 +136,17 @@ loadFramesAndIndex :: (Foldable f) => f Text -> IO (M.Map Text Int, M.Map Text I
 loadFramesAndIndex rids = buildMaps 0 M.empty M.empty [] <$> traverse loadResId (toList rids)
   where
     buildMaps :: (Ord k) => Int -> M.Map k Int -> M.Map k Int -> [a] -> [(k, [a])] -> (M.Map k Int, M.Map k Int, [a])
-    buildMaps _ im cm acc [] = (im, cm, reverse acc)
+    -- idx: Current index of texture
+    -- im: Map of base indices for textures
+    -- cm: Map of size of sprites (1 normally, 16 for water sprite)
+    buildMaps _ im cm acc [] = (im, cm, acc)
     buildMaps idx im cm acc ((rid, frames) : rest) =
       let count = length frames
        in buildMaps
             (idx + count)
             (M.insert rid idx im)
             (M.insert rid count cm)
-            (reverse frames ++ acc)
+            (acc ++ frames)
             rest
 
 buildLayerMaps :: [(Block, M.Map Direction (ResourceId, Bool))] -> M.Map ResourceId Int -> (M.Map BlockFace Int, M.Map BlockFace Int, S.Set Int)
@@ -168,23 +171,24 @@ buildLayerMaps perBlockFaces ridIndexMap =
 tintedBaseRids :: BlockModel -> S.Set ResourceId
 tintedBaseRids bm = S.fromList [rid | (_, rid, isOv, mTint) <- facesInfo bm, not isOv, isJust mTint]
 
-computeTintSets :: [Maybe BlockModel] -> M.Map ResourceId Int -> (S.Set Int, S.Set Int)
+leafTintBlocks :: S.Set Block
+leafTintBlocks = S.fromList [OakLeaves]
+
+computeTintSets :: [(Block, Maybe BlockModel)] -> M.Map ResourceId Int -> (S.Set Int, S.Set Int)
 computeTintSets models ridIndexMap = (grassIdxs, foliageIdxs)
   where
     baseIndex rid = M.lookup rid ridIndexMap
-    isFoliage t = "leaves" `T.isInfixOf` T.toLower t
-    -- foldMap ~ concatMap
-    tintedRids = foldMap tintedBaseRids (catMaybes models)
-
-    (foliageRids, grassRids) = partition isFoliage (toList tintedRids)
-
     toIdxSet = S.fromList . mapMaybe baseIndex
-
+    isFoliage p = fst p `elem` leafTintBlocks
+    perBlockTinted = [(b, tintedBaseRids bm) | (b, Just bm) <- models]
+    (foliage, grass) = partition isFoliage perBlockTinted
+    grassRids = foldMap (S.toList . snd) grass
+    foliageRids = foldMap (S.toList . snd) foliage
     grassIdxs = toIdxSet grassRids
     foliageIdxs = toIdxSet foliageRids
 
-justOrError :: Text -> Maybe a -> a
-justOrError = fromMaybe . error . T.unpack
+justOrError :: String -> Maybe a -> a
+justOrError = fromMaybe . error
 
 buildBlockAtlas :: IO Atlas
 buildBlockAtlas = do
@@ -202,15 +206,20 @@ buildBlockAtlas = do
       (baseLayerMap, overlayLayerMap, overlayIdxs) = buildLayerMaps perBlockFaces ridIndexMap
 
       layerOf :: Block -> Direction -> Int
-      layerOf Water _ = justOrError "Water base index missing" (baseIndexOf "minecraft:block/water_still_blue")
-      layerOf b d = justOrError ("Missing base layer for block/dir: " <> T.pack (show (b, d))) (M.lookup (b, d) baseLayerMap)
+      layerOf Water _ =
+        let waterRid = S.lookupMin (extraTexturesForBlock Water)
+         in justOrError "Water base index missing" (waterRid >>= baseIndexOf)
+      layerOf b d = justOrError ("Missing base layer for block/dir: " <> show (b, d)) (M.lookup (b, d) baseLayerMap)
 
       overlayOf :: Block -> Direction -> Maybe Int
       overlayOf b d = M.lookup (b, d) overlayLayerMap
 
-      waterBase = justOrError "Water base texture missing" (baseIndexOf "minecraft:block/water_still_blue")
-      waterFrames = justOrError "Water frames missing" (frameCountOf "minecraft:block/water_still_blue")
+      (waterBase, waterFrames) =
+        let waterRid = S.lookupMin (extraTexturesForBlock Water)
+         in ( justOrError "Water base texture missing" (waterRid >>= baseIndexOf),
+              justOrError "Water frames missing" (waterRid >>= frameCountOf)
+            )
 
-      (tintedGrassIdxs, tintedFoliageIdxs) = computeTintSets (fmap snd models) ridIndexMap
+      (tintedGrassIdxs, tintedFoliageIdxs) = computeTintSets models ridIndexMap
 
   pure $ Atlas tex layerOf overlayOf (SpecialIndices waterBase waterFrames tintedGrassIdxs tintedFoliageIdxs overlayIdxs)
