@@ -12,6 +12,7 @@ import Control.Concurrent.Async (async, link)
 import Control.Concurrent.STM
 import Control.DeepSeq (force)
 import Data.Vector.Storable qualified as VS
+import Game.Direction (Direction)
 import Game.World
 import Game.WorldSource
 import Linear
@@ -44,16 +45,16 @@ resultQueueSize = 128
 incomingQueueSize :: Int
 incomingQueueSize = 128
 
-startChunkWorkers :: Int -> WorldSource -> IO ChunkWorkers
-startChunkWorkers n ws = do
+startChunkWorkers :: Int -> WorldSource -> (Block -> Direction -> Float) -> (Block -> Direction -> Maybe Float) -> IO ChunkWorkers
+startChunkWorkers n ws texOf overlayOf = do
   q <- newTBQueueIO (fromIntegral incomingQueueSize)
   resQ <- newTBQueueIO (fromIntegral resultQueueSize)
-  let worker = workerLoop q resQ ws
+  let worker = workerLoop q resQ ws texOf overlayOf
   mapM_ (const (async worker >>= link)) [1 .. max 1 n]
   return (ChunkWorkers q resQ)
 
-workerLoop :: TBQueue (V2 Int) -> TBQueue PreparedChunk -> WorldSource -> IO ()
-workerLoop coordQ resQ ws = do
+workerLoop :: TBQueue (V2 Int) -> TBQueue PreparedChunk -> WorldSource -> (Block -> Direction -> Float) -> (Block -> Direction -> Maybe Float) -> IO ()
+workerLoop coordQ resQ ws texOf overlayOf = do
   coord <- atomically $ readTBQueue coordQ
   terrain <- ws coord
   let origin = V3 (cx * sx) (cy * sy) 0
@@ -61,13 +62,13 @@ workerLoop coordQ resQ ws = do
           V2 cx cy = coord
           V3 sx sy _ = chunkSize
 
-  let opaque = buildTerrainVertices terrain
-      water = buildWaterVertices terrain
-      leaves = buildLeavesVertices terrain
-      grass = buildGrassOverlayVertices terrain
+  let opaque = buildTerrainVertices texOf terrain
+      water = buildWaterVertices texOf terrain
+      leaves = buildLeavesVertices texOf terrain
+      grass = buildOverlayVertices overlayOf terrain
       prepared = PreparedChunk coord origin terrain (Mesh opaque water leaves grass)
   -- This forces the evalation of the meshes on the worker thread
   let Mesh o w l g = pcMeshes prepared
   !_ <- pure (force (VS.length o + VS.length w + VS.length l + VS.length g))
   atomically $ writeTBQueue resQ prepared
-  workerLoop coordQ resQ ws
+  workerLoop coordQ resQ ws texOf overlayOf
