@@ -1,4 +1,9 @@
-module Rendering.Shader.Terrain (loadTerrainProgramWith) where
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+
+module Rendering.Shader.Terrain (loadTerrainProgramWith, TerrainVertexT, TerrainFragmentT, TerrainUs, TerrainStatic, bindTerrainStatics) where
 
 import Data.Set qualified as S
 import Game.Block.Atlas (SpecialIndices (..))
@@ -7,36 +12,60 @@ import Rendering.Shader.AST
 import Rendering.Shader.Typed
 import Rendering.Shader.Utils
 
-terrainVertexAST :: ShaderSource
-terrainVertexAST = runVertexT $ do
+type TerrainVertexT = '[ '("uView", 'Mat4), '("uProj", 'Mat4)]
+
+type TerrainFragmentT =
+  '[ '("uAtlas", 'Sampler2DArray),
+     '("uGrassColormap", 'Sampler2D),
+     '("uFoliageColormap", 'Sampler2D),
+     '("uAlphaCutoff", 'FloatT),
+     '("uFogColor", 'V3),
+     '("uFogStart", 'FloatT),
+     '("uFogEnd", 'FloatT),
+     '("uTime", 'FloatT)
+   ]
+
+type TerrainUs = AppendPairs TerrainVertexT TerrainFragmentT
+
+type TerrainStatic = '[ '("uAtlas", 'Sampler2DArray), '("uGrassColormap", 'Sampler2D), '("uFoliageColormap", 'Sampler2D), '("uAlphaCutoff", 'FloatT)]
+
+bindTerrainStatics :: ProgramU TerrainUs -> Int -> Int -> Int -> Float -> IO ()
+bindTerrainStatics pu atlasUnit grassUnit foliageUnit alphaCut = do
+  setSampler2DArray @"uAtlas" pu (GL.TextureUnit (fromIntegral atlasUnit))
+  setSampler2D @"uGrassColormap" pu (GL.TextureUnit (fromIntegral grassUnit))
+  setSampler2D @"uFoliageColormap" pu (GL.TextureUnit (fromIntegral foliageUnit))
+  setFloat @"uAlphaCutoff" pu alphaCut
+
+terrainVertexT :: ShaderT TerrainVertexT ()
+terrainVertexT = do
   aPos <- inV3 "aPos"
   aTC <- inV3 "aTC"
   aClimate <- inV2 "aClimate"
   vTC <- outV3 "vTC"
   vClimate <- outV2 "vClimate"
   vFogDist <- outF "vFogDist"
-  uView <- uniformMat4 "uView"
-  uProj <- uniformMat4 "uProj"
+  uView <- uniformMat4 @"uView"
+  uProj <- uniformMat4 @"uProj"
   assignN vTC (use aTC)
   assignN vClimate (use aClimate)
   let posVS = use uView .*. vec4 (use aPos, 1.0 :: Double)
   assignN vFogDist (length3 (xyz posVS))
   assignGLPosition (use uProj .*. posVS)
 
-terrainFragmentAST :: SpecialIndices -> ShaderSource
-terrainFragmentAST spec = runFragmentT $ do
+terrainFragmentT :: SpecialIndices -> ShaderT TerrainFragmentT ()
+terrainFragmentT spec = do
   vTC <- inV3 "vTC"
   vClimate <- inV2 "vClimate"
   vFogDist <- inF "vFogDist"
   frag <- outV4 "FragColor"
-  uAtlas <- uniformSampler2DArray "uAtlas"
-  uGrass <- uniformSampler2D "uGrassColormap"
-  uFoliage <- uniformSampler2D "uFoliageColormap"
-  uAlphaCutoff <- uniformFloat "uAlphaCutoff"
-  uFogColor <- uniformV3 "uFogColor"
-  uFogStart <- uniformFloat "uFogStart"
-  uFogEnd <- uniformFloat "uFogEnd"
-  uTime <- uniformFloat "uTime"
+  uAtlas <- uniformSampler2DArray @"uAtlas"
+  uGrass <- uniformSampler2D @"uGrassColormap"
+  uFoliage <- uniformSampler2D @"uFoliageColormap"
+  uAlphaCutoff <- uniformFloat @"uAlphaCutoff"
+  uFogColor <- uniformV3 @"uFogColor"
+  uFogStart <- uniformFloat @"uFogStart"
+  uFogEnd <- uniformFloat @"uFogEnd"
+  uTime <- uniformFloat @"uTime"
 
   texCoord <- localV3 "texCoord" (Just (use vTC))
 
@@ -80,8 +109,8 @@ terrainFragmentAST spec = runFragmentT $ do
   rgbCol <- localV3 "rgb" (Just (mixV3 (rgb (use base)) (use uFogColor) (use fog)))
   assignN frag (vec4 (use rgbCol, a (use base)))
 
-loadTerrainProgramWith :: SpecialIndices -> IO GL.Program
+loadTerrainProgramWith :: SpecialIndices -> IO (ProgramU TerrainUs)
 loadTerrainProgramWith spec = do
-  let vsrc = toSrc terrainVertexAST
-      fsrc = toSrc (terrainFragmentAST spec)
-  loadProgramFromSources vsrc fsrc
+  let vsrc = toSrc (runVertexT terrainVertexT)
+      fsrc = toSrc (runFragmentT (terrainFragmentT spec))
+  ProgramU <$> loadProgramFromSources vsrc fsrc

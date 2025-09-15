@@ -1,14 +1,18 @@
+{-# LANGUAGE AllowAmbiguousTypes #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
 module Rendering.Shader.Typed where
 
+import Control.Monad.IO.Class (MonadIO (liftIO))
 import Control.Monad.Writer.Strict
   ( MonadWriter (tell),
     Writer,
@@ -17,16 +21,24 @@ import Control.Monad.Writer.Strict
     runWriter,
   )
 import Data.Functor (($>))
+import Data.Kind (Constraint)
+import Data.Proxy (Proxy (..))
+import GHC.TypeLits (ErrorMessage (..), KnownSymbol, Symbol, TypeError, symbolVal)
 import GHC.TypeNats (Nat, type (+), type (<=))
+import Graphics.Rendering.OpenGL (($=))
+import Graphics.Rendering.OpenGL.GL qualified as GL
+import Linear (M44)
+import Linear.V3 qualified as L (V3 (..))
 import Rendering.Shader.AST
+import Utils.Math (toGLMatrix)
 
 newtype Name (t :: Datatype) = Name {nStr :: String}
 
 {-
-TODO: Investigate if there is actual value in having this typed AST. 
+TODO: Investigate if there is actual value in having this typed AST.
 Alternative approach: Wrap values of untyped AST in a newtype with a type-level (OpenGL-)type parameter
 This would heavily reduce the code duplication and since we can already enforce some invariants
-only via the "smart" constructors and not the GADT itself (see below), this might provide the 
+only via the "smart" constructors and not the GADT itself (see below), this might provide the
 same effective type safety in the OpenGL EDSL.
 -}
 data TypedExpr (t :: Datatype) where
@@ -84,16 +96,16 @@ instance Monoid Acc where
   mempty :: Acc
   mempty = Acc [] [] [] []
 
-newtype ShaderT a = ShaderT {unT :: Writer Acc a}
+newtype ShaderT (us :: [(Symbol, Datatype)]) a = ShaderT {unT :: Writer Acc a}
   deriving (Functor, Applicative, Monad)
 
-runVertexT :: ShaderT a -> ShaderSource
+runVertexT :: ShaderT us a -> ShaderSource
 runVertexT = runWith VertexShader
 
-runFragmentT :: ShaderT a -> ShaderSource
+runFragmentT :: ShaderT us a -> ShaderSource
 runFragmentT = runWith FragmentShader
 
-runWith :: ShaderType -> ShaderT a -> ShaderSource
+runWith :: ShaderType -> ShaderT us a -> ShaderSource
 runWith ty (ShaderT m) =
   let acc = execWriter m
       fun = Function {sfType = ty, sfName = "main", sfArgs = [], sfBody = map untypeS (aBodyT acc)}
@@ -105,58 +117,67 @@ runWith ty (ShaderT m) =
           ssFunctions = pure fun
         }
 
-appendBody :: TStmt -> ShaderT ()
+appendBody :: TStmt -> ShaderT us ()
 appendBody s = ShaderT $ tell mempty {aBodyT = [s]}
 
-inF :: String -> ShaderT (Name 'FloatT)
+inF :: String -> ShaderT us (Name 'FloatT)
 inF s = ShaderT $ tell mempty {aIns = [(FloatT, s)]} $> Name s
 
-inV2 :: String -> ShaderT (Name 'V2)
+inV2 :: String -> ShaderT us (Name 'V2)
 inV2 s = ShaderT $ tell mempty {aIns = [(V2, s)]} $> Name s
 
-inV3 :: String -> ShaderT (Name 'V3)
+inV3 :: String -> ShaderT us (Name 'V3)
 inV3 s = ShaderT $ tell mempty {aIns = [(V3, s)]} $> Name s
 
-inV4 :: String -> ShaderT (Name 'V4)
+inV4 :: String -> ShaderT us (Name 'V4)
 inV4 s = ShaderT $ tell mempty {aIns = [(V4, s)]} $> Name s
 
-outF :: String -> ShaderT (Name 'FloatT)
+outF :: String -> ShaderT us (Name 'FloatT)
 outF s = ShaderT $ tell mempty {aOuts = [(FloatT, s)]} $> Name s
 
-outV2 :: String -> ShaderT (Name 'V2)
+outV2 :: String -> ShaderT us (Name 'V2)
 outV2 s = ShaderT $ tell mempty {aOuts = [(V2, s)]} $> Name s
 
-outV3 :: String -> ShaderT (Name 'V3)
+outV3 :: String -> ShaderT us (Name 'V3)
 outV3 s = ShaderT $ tell mempty {aOuts = [(V3, s)]} $> Name s
 
-outV4 :: String -> ShaderT (Name 'V4)
+outV4 :: String -> ShaderT us (Name 'V4)
 outV4 s = ShaderT $ tell mempty {aOuts = [(V4, s)]} $> Name s
 
-uniformFloat :: String -> ShaderT (Name 'FloatT)
-uniformFloat s = ShaderT $ tell mempty {aUnis = [(FloatT, s)]} $> Name s
+-- Type-level membership proof that a uniform (name, type) is in `us`
+type family HasUniform (name :: Symbol) (t :: Datatype) (us :: [(Symbol, Datatype)]) :: Constraint where
+  HasUniform name t ('(name, t) ': rest) = ()
+  HasUniform name t ('(other, u) ': rest) = HasUniform name t rest
+  HasUniform name t '[] =
+    TypeError
+      ( 'Text "Uniform " ':<>: 'Text name ':<>: 'Text " of type " ':<>: 'ShowType t ':<>: 'Text " is not imported in this shader"
+      )
 
-uniformV3 :: String -> ShaderT (Name 'V3)
-uniformV3 s = ShaderT $ tell mempty {aUnis = [(V3, s)]} $> Name s
+uniformFloat :: forall name us. (KnownSymbol name, HasUniform name 'FloatT us) => ShaderT us (Name 'FloatT)
+uniformFloat = ShaderT $ let s = symbolVal (Proxy @name) in tell mempty {aUnis = [(FloatT, s)]} $> Name s
 
-uniformMat4 :: String -> ShaderT (Name 'Mat4)
-uniformMat4 s = ShaderT $ tell mempty {aUnis = [(Mat4, s)]} $> Name s
+uniformV3 :: forall name us. (KnownSymbol name, HasUniform name 'V3 us) => ShaderT us (Name 'V3)
+uniformV3 = ShaderT $ let s = symbolVal (Proxy @name) in tell mempty {aUnis = [(V3, s)]} $> Name s
 
-uniformSampler2D :: String -> ShaderT (Name 'Sampler2D)
-uniformSampler2D s = ShaderT $ tell mempty {aUnis = [(Sampler2D, s)]} $> Name s
+uniformMat4 :: forall name us. (KnownSymbol name, HasUniform name 'Mat4 us) => ShaderT us (Name 'Mat4)
+uniformMat4 = ShaderT $ let s = symbolVal (Proxy @name) in tell mempty {aUnis = [(Mat4, s)]} $> Name s
 
-uniformSampler2DArray :: String -> ShaderT (Name 'Sampler2DArray)
-uniformSampler2DArray s = ShaderT $ tell mempty {aUnis = [(Sampler2DArray, s)]} $> Name s
+uniformSampler2D :: forall name us. (KnownSymbol name, HasUniform name 'Sampler2D us) => ShaderT us (Name 'Sampler2D)
+uniformSampler2D = ShaderT $ let s = symbolVal (Proxy @name) in tell mempty {aUnis = [(Sampler2D, s)]} $> Name s
 
-localF :: String -> Maybe (TypedExpr 'FloatT) -> ShaderT (Name 'FloatT)
+uniformSampler2DArray :: forall name us. (KnownSymbol name, HasUniform name 'Sampler2DArray us) => ShaderT us (Name 'Sampler2DArray)
+uniformSampler2DArray = ShaderT $ let s = symbolVal (Proxy @name) in tell mempty {aUnis = [(Sampler2DArray, s)]} $> Name s
+
+localF :: String -> Maybe (TypedExpr 'FloatT) -> ShaderT us (Name 'FloatT)
 localF s mi = appendBody (TDeclF s mi) $> Name s
 
-localV2 :: String -> Maybe (TypedExpr 'V2) -> ShaderT (Name 'V2)
+localV2 :: String -> Maybe (TypedExpr 'V2) -> ShaderT us (Name 'V2)
 localV2 s mi = appendBody (TDeclV2 s mi) $> Name s
 
-localV3 :: String -> Maybe (TypedExpr 'V3) -> ShaderT (Name 'V3)
+localV3 :: String -> Maybe (TypedExpr 'V3) -> ShaderT us (Name 'V3)
 localV3 s mi = appendBody (TDeclV3 s mi) $> Name s
 
-localV4 :: String -> Maybe (TypedExpr 'V4) -> ShaderT (Name 'V4)
+localV4 :: String -> Maybe (TypedExpr 'V4) -> ShaderT us (Name 'V4)
 localV4 s mi = appendBody (TDeclV4 s mi) $> Name s
 
 use :: Name t -> TypedExpr t
@@ -309,10 +330,10 @@ texture2D = TypedTexture2d
 texture2DArray :: Name 'Sampler2DArray -> TypedExpr 'V3 -> TypedExpr 'V4
 texture2DArray = TypedTexture2dArray
 
-assignN :: Name t -> TypedExpr t -> ShaderT ()
+assignN :: Name t -> TypedExpr t -> ShaderT us ()
 assignN nm v = appendBody (TAssign nm v)
 
-assignGLPosition :: TypedExpr 'V4 -> ShaderT ()
+assignGLPosition :: TypedExpr 'V4 -> ShaderT us ()
 assignGLPosition v = appendBody (TAssignGL v)
 
 dedupeDecls :: [(Datatype, String)] -> [(Datatype, String)]
@@ -323,19 +344,64 @@ dedupeDecls = foldr go []
         Nothing -> (dt, n) : acc
         Just _ -> acc
 
-withBlock :: ShaderT () -> ShaderT [TStmt]
+withBlock :: ShaderT us () -> ShaderT us [TStmt]
 withBlock (ShaderT m) = ShaderT $ do
   let (_, acc) = runWriter m
   tell mempty {aIns = aIns acc, aOuts = aOuts acc, aUnis = aUnis acc}
   pure (aBodyT acc)
 
-ifT :: TypedExpr 'BoolT -> ShaderT () -> ShaderT ()
+ifT :: TypedExpr 'BoolT -> ShaderT us () -> ShaderT us ()
 ifT c t = do
   tb <- withBlock t
   appendBody (TIf c tb)
 
-discardT :: ShaderT ()
+discardT :: ShaderT us ()
 discardT = appendBody TDiscard
+
+newtype ProgramU (us :: [(Symbol, Datatype)]) = ProgramU {unProgram :: GL.Program}
+
+withProgram :: (MonadIO m) => ProgramU us -> IO a -> m a
+withProgram pu act = do
+  prev <- GL.get GL.currentProgram
+  GL.currentProgram $= Just (unProgram pu)
+  r <- liftIO act
+  GL.currentProgram $= prev
+  pure r
+
+getUniformLocation :: forall name t us. (KnownSymbol name, HasUniform name t us) => ProgramU us -> IO GL.UniformLocation
+getUniformLocation (ProgramU prog) = do
+  let s = symbolVal (Proxy @name)
+  GL.get (GL.uniformLocation prog s)
+
+setFloat :: forall name us. (KnownSymbol name, HasUniform name 'FloatT us) => ProgramU us -> Float -> IO ()
+setFloat pu v = do
+  u <- getUniformLocation @name @'FloatT pu
+  GL.uniform u $= (realToFrac v :: GL.GLfloat)
+
+setV3 :: forall name us. (KnownSymbol name, HasUniform name 'V3 us) => ProgramU us -> L.V3 Float -> IO ()
+setV3 pu (L.V3 vx vy vz) = do
+  u <- getUniformLocation @name @'V3 pu
+  GL.uniform u $= GL.Color3 (realToFrac vx :: GL.GLfloat) (realToFrac vy :: GL.GLfloat) (realToFrac vz :: GL.GLfloat)
+
+setSampler2D :: forall name us. (KnownSymbol name, HasUniform name 'Sampler2D us) => ProgramU us -> GL.TextureUnit -> IO ()
+setSampler2D pu unit = do
+  u <- getUniformLocation @name @'Sampler2D pu
+  GL.uniform u $= unit
+
+setSampler2DArray :: forall name us. (KnownSymbol name, HasUniform name 'Sampler2DArray us) => ProgramU us -> GL.TextureUnit -> IO ()
+setSampler2DArray pu unit = do
+  u <- getUniformLocation @name @'Sampler2DArray pu
+  GL.uniform u $= unit
+
+setMat4 :: forall name us. (KnownSymbol name, HasUniform name 'Mat4 us) => ProgramU us -> M44 Float -> IO ()
+setMat4 pu m44 = do
+  u <- getUniformLocation @name @'Mat4 pu
+  m <- toGLMatrix m44
+  GL.uniform u $= m
+
+type family AppendPairs (xs :: [(Symbol, Datatype)]) (ys :: [(Symbol, Datatype)]) :: [(Symbol, Datatype)] where
+  AppendPairs '[] ys = ys
+  AppendPairs (x ': xs) ys = x ': AppendPairs xs ys
 
 untypeS :: TStmt -> Statement
 untypeS s = case s of
