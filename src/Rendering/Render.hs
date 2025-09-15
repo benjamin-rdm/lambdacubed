@@ -8,6 +8,7 @@ where
 import Game.Direction (Direction)
 import Game.World (Block)
 import Graphics.Rendering.OpenGL.GL qualified as GL
+import Rendering.Buffer (Buffer)
 import Rendering.Shader.Outline (OutlineUs)
 import Rendering.Shader.Sky (SkyUs)
 import Rendering.Shader.Terrain (TerrainUs)
@@ -35,15 +36,12 @@ data AtlasIndex = AtlasIndex
 data RenderState = RenderState
   { rsTerrainP :: !(ProgramU TerrainUs),
     rsSkyP :: !(ProgramU SkyUs),
-    rsSkyVAO :: !GL.VertexArrayObject,
-    rsSkyVBO :: !GL.BufferObject,
+    rsSkyBuf :: !Buffer,
     rsOutlineP :: !(ProgramU OutlineUs),
-    rsOutlineVAO :: !GL.VertexArrayObject,
-    rsOutlineVBO :: !GL.BufferObject,
+    rsOutlineBuf :: !Buffer,
     rsUIP :: !(ProgramU UiUs),
     rsUITex :: !GL.TextureObject,
-    rsUIVAO :: !GL.VertexArrayObject,
-    rsUIVBO :: !GL.BufferObject,
+    rsUIBuf :: !Buffer,
     rsAtlasTex :: !GL.TextureObject,
     rsAtlasIndex :: !AtlasIndex
   }

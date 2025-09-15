@@ -49,6 +49,7 @@ executable lambdacubed-exe
     Game.World
     Game.WorldManager
     Game.WorldSource
+    Rendering.Buffer
     Rendering.Camera
     Rendering.Mesh
     Rendering.Render

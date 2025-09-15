@@ -3,7 +3,7 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Rendering.Shader.Terrain (loadTerrainProgramWith, TerrainVertexT, TerrainFragmentT, TerrainUs, TerrainStatic, bindTerrainStatics) where
+module Rendering.Shader.Terrain (loadTerrainProgramWith, TerrainVertexT, TerrainFragmentT, TerrainUs, bindTerrainStatics) where
 
 import Data.Set qualified as S
 import Game.Block.Atlas (SpecialIndices (..))
@@ -26,8 +26,6 @@ type TerrainFragmentT =
    ]
 
 type TerrainUs = AppendPairs TerrainVertexT TerrainFragmentT
-
-type TerrainStatic = '[ '("uAtlas", 'Sampler2DArray), '("uGrassColormap", 'Sampler2D), '("uFoliageColormap", 'Sampler2D), '("uAlphaCutoff", 'FloatT)]
 
 bindTerrainStatics :: ProgramU TerrainUs -> Int -> Int -> Int -> Float -> IO ()
 bindTerrainStatics pu atlasUnit grassUnit foliageUnit alphaCut = do

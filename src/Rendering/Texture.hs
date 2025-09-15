@@ -7,7 +7,9 @@ module Rendering.Texture
     PixelRGBA8,
     loadImage,
     createTextureArrayFromImages,
-    withTextureUnit
+    withTextureUnit,
+    withTexture2DArray,
+    bindTexture2DArrayAtUnit
   )
 where
 
@@ -127,3 +129,18 @@ withTexture2D unit tex act = withTextureUnit unit $ do
   r <- act
   GL.textureBinding GL.Texture2D $= prev
   pure r
+
+withTexture2DArray :: Int -> GL.TextureObject -> IO a -> IO a
+withTexture2DArray unit tex act = withTextureUnit unit $ do
+  prev <- GL.get (GL.textureBinding GL.Texture2DArray)
+  GL.texture GL.Texture2DArray $= GL.Enabled
+  GL.textureBinding GL.Texture2DArray $= Just tex
+  r <- act
+  GL.textureBinding GL.Texture2DArray $= prev
+  pure r
+
+bindTexture2DArrayAtUnit :: Int -> GL.TextureObject -> IO ()
+bindTexture2DArrayAtUnit unit tex = do
+  GL.activeTexture $= GL.TextureUnit (fromIntegral unit)
+  GL.texture GL.Texture2DArray $= GL.Enabled
+  GL.textureBinding GL.Texture2DArray $= Just tex

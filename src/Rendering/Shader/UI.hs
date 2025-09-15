@@ -1,12 +1,12 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE TypeApplications #-}
+
 module Rendering.Shader.UI
   ( UiUs,
-    UiStatic,
     loadUIProgram,
-    bindUiStatics
+    bindUiStatics,
   )
 where
 
@@ -15,10 +15,9 @@ import Rendering.Shader.AST
 import Rendering.Shader.Typed
 import Rendering.Shader.Utils
 
-type UiUs = AppendPairs '[ '("uAspect", 'FloatT) ] '[ '("uUiTex", 'Sampler2D) ]
-type UiStatic = '[ '("uUiTex", 'Sampler2D) ]
+type UiUs = AppendPairs '[ '("uAspect", 'FloatT)] '[ '("uUiTex", 'Sampler2D)]
 
-uiVertexT :: ShaderT '[ '("uAspect", 'FloatT) ] ()
+uiVertexT :: ShaderT '[ '("uAspect", 'FloatT)] ()
 uiVertexT = do
   aPos <- inV2 "aPos"
   aUV <- inV2 "aUV"
@@ -29,7 +28,7 @@ uiVertexT = do
       pos2 = use aPos .*. vec2 (invA, 1.0 :: Double)
   assignGLPosition (vec4 (pos2, 0.0 :: Double, 1.0 :: Double))
 
-uiFragmentT :: ShaderT '[ '("uUiTex", 'Sampler2D) ] ()
+uiFragmentT :: ShaderT '[ '("uUiTex", 'Sampler2D)] ()
 uiFragmentT = do
   vUV <- inV2 "vUV"
   frag <- outV4 "FragColor"
@@ -44,6 +43,6 @@ loadUIProgram = do
   let vsrc = toSrc (runVertexT uiVertexT)
       fsrc = toSrc (runFragmentT uiFragmentT)
   ProgramU <$> loadProgramFromSources vsrc fsrc
- 
+
 bindUiStatics :: ProgramU UiUs -> Int -> IO ()
 bindUiStatics p i = setSampler2D @"uUiTex" p (GL.TextureUnit (fromIntegral i))
