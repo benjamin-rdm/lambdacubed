@@ -32,7 +32,7 @@ import Rendering.Shader.Sky (SkyUs, bindSkyStatics, loadSkyProgram)
 import Rendering.Shader.Terrain (TerrainUs, bindTerrainStatics, loadTerrainProgramWith)
 import Rendering.Shader.Typed (ProgramU (..), setFloat, setMat4, withProgram)
 import Rendering.Shader.UI (UiUs, bindUiStatics, loadUIProgram)
-import Rendering.Texture (bindTexture2DArrayAtUnit, loadTextureAtUnit, withTextureUnit)
+import Rendering.Texture (bindTexture2DArrayAtUnit, loadTextureAtUnit)
 import Utils.Monad
 
 data Env = Env
@@ -509,15 +509,11 @@ drawWorldOverlays chunks = do
 
 drawCrosshairUIM :: (MonadEnv m, MonadIO m) => m ()
 drawCrosshairUIM = withBlend $ do
-  Env {envAspectRef, envRender = RenderState {rsUIP, rsUITex, rsUIBuf}} <- askEnv
-  withProgram rsUIP $ withTextureUnit 1 $ do
-    GL.textureBinding GL.Texture2D $= Just rsUITex
-    aspect <- readIORef envAspectRef
+  Env {envAspectRef, envRender = RenderState {rsUIP, rsUIBuf}} <- askEnv
+  aspect <- liftIO $ readIORef envAspectRef
+  withProgram rsUIP $ do
     setFloat @"uAspect" rsUIP aspect
-
     drawBufferAs GL.TriangleFan rsUIBuf
-
-    GL.bindVertexArrayObject $= Nothing
 
 generateBlockOutlineVerticesM :: (MonadWorld m) => V3 Int -> V3 Float -> m [Float]
 generateBlockOutlineVerticesM blk camPos = do

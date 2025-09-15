@@ -8,6 +8,7 @@ module Rendering.Texture
     loadImage,
     createTextureArrayFromImages,
     withTextureUnit,
+    withTexture2D,
     withTexture2DArray,
     bindTexture2DArrayAtUnit
   )
