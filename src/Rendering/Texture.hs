@@ -1,11 +1,15 @@
 module Rendering.Texture
   ( loadTextureFromPng,
     setupTextureMode,
+    loadTextureAtUnit,
     extractSpriteFrames,
     Image,
     PixelRGBA8,
     loadImage,
-    createTextureArrayFromImages
+    createTextureArrayFromImages,
+    withTextureUnit,
+    withTexture2DArray,
+    bindTexture2DArrayAtUnit
   )
 where
 
@@ -86,7 +90,6 @@ loadTextureFromPng filename = do
 setupTextureMode :: (GL.ParameterizedTextureTarget a) => a -> IO ()
 setupTextureMode = configureTextureParameters
 
-
 createTextureArrayFromImages :: [Image PixelRGBA8] -> IO GL.TextureObject
 createTextureArrayFromImages imgs = do
   tex <- createTextureObject
@@ -97,3 +100,47 @@ createTextureArrayFromImages imgs = do
   setupTexture3D GL.Texture2DArray imgs
   GL.generateMipmap GL.Texture2DArray $= GL.Enabled
   pure tex
+
+loadTextureAtUnit :: Int -> FilePath -> IO GL.TextureObject
+loadTextureAtUnit unit path = do
+  tex <- createTextureObject
+  withTexture2D unit tex $ do
+    setupTextureMode GL.Texture2D
+    loadTextureFromPng path
+    GL.generateMipmap GL.Texture2D $= GL.Enabled
+  GL.activeTexture $= GL.TextureUnit (fromIntegral unit)
+  GL.texture GL.Texture2D $= GL.Enabled
+  GL.textureBinding GL.Texture2D $= Just tex
+  pure tex
+
+withTextureUnit :: Int -> IO a -> IO a
+withTextureUnit unit act = do
+  prev <- GL.get GL.activeTexture
+  GL.activeTexture $= GL.TextureUnit (fromIntegral unit)
+  r <- act
+  GL.activeTexture $= prev
+  pure r
+
+withTexture2D :: Int -> GL.TextureObject -> IO a -> IO a
+withTexture2D unit tex act = withTextureUnit unit $ do
+  prev <- GL.get (GL.textureBinding GL.Texture2D)
+  GL.texture GL.Texture2D $= GL.Enabled
+  GL.textureBinding GL.Texture2D $= Just tex
+  r <- act
+  GL.textureBinding GL.Texture2D $= prev
+  pure r
+
+withTexture2DArray :: Int -> GL.TextureObject -> IO a -> IO a
+withTexture2DArray unit tex act = withTextureUnit unit $ do
+  prev <- GL.get (GL.textureBinding GL.Texture2DArray)
+  GL.texture GL.Texture2DArray $= GL.Enabled
+  GL.textureBinding GL.Texture2DArray $= Just tex
+  r <- act
+  GL.textureBinding GL.Texture2DArray $= prev
+  pure r
+
+bindTexture2DArrayAtUnit :: Int -> GL.TextureObject -> IO ()
+bindTexture2DArrayAtUnit unit tex = do
+  GL.activeTexture $= GL.TextureUnit (fromIntegral unit)
+  GL.texture GL.Texture2DArray $= GL.Enabled
+  GL.textureBinding GL.Texture2DArray $= Just tex

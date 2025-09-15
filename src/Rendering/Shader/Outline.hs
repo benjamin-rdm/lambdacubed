@@ -1,27 +1,34 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE TypeApplications #-}
+
 module Rendering.Shader.Outline
-  ( loadOutlineProgram,
+  ( OutlineUs,
+    loadOutlineProgram
   )
 where
 
-import Graphics.Rendering.OpenGL.GL qualified as GL
 import Rendering.Shader.AST
 import Rendering.Shader.Typed
 import Rendering.Shader.Utils
 
-outlineVertexAST :: ShaderSource
-outlineVertexAST = runVertexT $ do
+type OutlineUs = AppendPairs '[ '("uView", 'Mat4), '("uProj", 'Mat4) ] '[]
+
+outlineVertexT :: ShaderT '[ '("uView", 'Mat4), '("uProj", 'Mat4)] ()
+outlineVertexT = do
   aPos <- inV3 "aPos"
-  uView <- uniformMat4 "uView"
-  uProj <- uniformMat4 "uProj"
+  uView <- uniformMat4 @"uView"
+  uProj <- uniformMat4 @"uProj"
   assignGLPosition ((use uProj .*. use uView) .*. vec4 (use aPos, 1.0 :: Double))
 
-outlineFragmentAST :: ShaderSource
-outlineFragmentAST = runFragmentT $ do
+outlineFragmentT :: ShaderT '[] ()
+outlineFragmentT = do
   frag <- outV4 "FragColor"
   assignN frag (vec4 (0.0 :: Double, 0.0 :: Double, 0.0 :: Double, 1.0 :: Double))
 
-loadOutlineProgram :: IO GL.Program
+loadOutlineProgram :: IO (ProgramU OutlineUs)
 loadOutlineProgram = do
-  let vsrc = toSrc outlineVertexAST
-      fsrc = toSrc outlineFragmentAST
-  loadProgramFromSources vsrc fsrc
+  let vsrc = toSrc (runVertexT outlineVertexT)
+      fsrc = toSrc (runFragmentT outlineFragmentT)
+  ProgramU <$> loadProgramFromSources vsrc fsrc

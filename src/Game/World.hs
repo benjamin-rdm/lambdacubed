@@ -12,7 +12,7 @@ module Game.World
     buildLeavesVertices,
     buildOverlayVertices,
     TerrainChunk (..),
-    GpuMesh (..),
+    GpuMesh,
     uploadGpuMesh,
     deleteGpuMesh,
     blockAtV3,
@@ -36,6 +36,7 @@ import Game.Direction
 import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Linear
+import Rendering.Buffer (Buffer (..), deleteBuffer)
 import Utils.Monad
 import Utils.PerlinNoise (perlin2)
 
@@ -500,9 +501,10 @@ buildOverlayVertices overlayOf chunk@(TerrainChunk chunkOrigin _) = VS.create $ 
   mv <- VSM.new totalFloats
   let stepDir worldPosI block off dir =
         case overlayOf block dir of
-          Just layer | faceVisible worldPosI dir ->
-            let (v1, v2, v3, v4) = faceCorners worldPosI dir
-             in writeFace mv off v1 v2 v3 v4 layer defaultClimate
+          Just layer
+            | faceVisible worldPosI dir ->
+                let (v1, v2, v3, v4) = faceCorners worldPosI dir
+                 in writeFace mv off v1 v2 v3 v4 layer defaultClimate
           _ -> pure off
       stepPos off p =
         let block = blockAtV3 chunk p
@@ -510,11 +512,7 @@ buildOverlayVertices overlayOf chunk@(TerrainChunk chunkOrigin _) = VS.create $ 
   foldM_ stepPos 0 positions
   pure mv
 
-data GpuMesh = GpuMesh
-  { gmVAO :: !GL.VertexArrayObject,
-    gmVBO :: !GL.BufferObject,
-    gmCount :: !Int
-  }
+type GpuMesh = Buffer
 
 uploadGpuMesh :: VS.Vector Float -> IO GpuMesh
 uploadGpuMesh verts = do
@@ -537,9 +535,8 @@ uploadGpuMesh verts = do
   GL.vertexAttribPointer (GL.AttribLocation 2)
     $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float (8 * 4) (plusPtr nullPtr (6 * 4)))
   GL.vertexAttribArray (GL.AttribLocation 2) $= GL.Enabled
-  pure $ GpuMesh vao vbo (VS.length verts `div` 8)
+
+  pure $ Buffer vao vbo (VS.length verts `div` 8)
 
 deleteGpuMesh :: GpuMesh -> IO ()
-deleteGpuMesh (GpuMesh vao vbo _) = do
-  GL.deleteObjectName vbo
-  GL.deleteObjectName vao
+deleteGpuMesh = deleteBuffer

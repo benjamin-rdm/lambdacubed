@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+
 module Main (main) where
 
 import App.Config qualified as C
@@ -5,11 +7,11 @@ import Control.Monad (unless, void, when)
 import Control.Monad.IO.Class (MonadIO (..))
 import Control.Monad.Reader (MonadReader, ReaderT (..), ask)
 import Control.Monad.Trans.Class (lift)
+import Data.Foldable (forM_)
 import Data.IORef
 import Data.Map.Strict qualified as M
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe)
-import Foreign.Marshal.Array (withArray)
 import Foreign.Ptr (nullPtr, plusPtr)
 import Game.Block.Atlas (Atlas (..), SpecialIndices (..), buildBlockAtlas)
 import Game.ChunkWorkers
@@ -21,15 +23,16 @@ import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Graphics.UI.GLFW qualified as GLFW
 import Linear
+import Rendering.Buffer (Buffer (..), bufferSubDataFloats, createBufferWithVertices, createDynamicBuffer, drawBuffer, drawBufferAs, drawBufferCount)
 import Rendering.Camera
 import Rendering.Mesh (Mesh (..))
 import Rendering.Render (AtlasIndex (..), MonadRender (..), RenderState (..))
-import Rendering.Shader.Outline (loadOutlineProgram)
-import Rendering.Shader.Sky (loadSkyProgram)
-import Rendering.Shader.Terrain (loadTerrainProgramWith)
-import Rendering.Shader.UI (loadUIProgram)
-import Rendering.Texture (loadTextureFromPng, setupTextureMode)
-import Utils.Math (toGLMatrix)
+import Rendering.Shader.Outline (OutlineUs, loadOutlineProgram)
+import Rendering.Shader.Sky (SkyUs, bindSkyStatics, loadSkyProgram)
+import Rendering.Shader.Terrain (TerrainUs, bindTerrainStatics, loadTerrainProgramWith)
+import Rendering.Shader.Typed (ProgramU (..), setFloat, setMat4, withProgram)
+import Rendering.Shader.UI (UiUs, bindUiStatics, loadUIProgram)
+import Rendering.Texture (bindTexture2DArrayAtUnit, loadTextureAtUnit, withTextureUnit)
 import Utils.Monad
 
 data Env = Env
@@ -99,26 +102,6 @@ setupPositionUVAttributes = do
     $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float (4 * 4) (plusPtr nullPtr (2 * 4)))
   GL.vertexAttribArray (GL.AttribLocation 1) $= GL.Enabled
 
-createVAOWithVertices :: [Float] -> GL.NumComponents -> IO (GL.VertexArrayObject, GL.BufferObject)
-createVAOWithVertices vertices componentCount = do
-  vao <- GL.genObjectName
-  vbo <- GL.genObjectName
-  GL.bindVertexArrayObject $= Just vao
-  GL.bindBuffer GL.ArrayBuffer $= Just vbo
-
-  withArray vertices $ \ptr -> do
-    let bytes = fromIntegral (length vertices * 4)
-    GL.bufferData GL.ArrayBuffer $= (bytes, ptr, GL.StaticDraw)
-
-  let stride :: GL.GLsizei
-      stride = fromIntegral componentCount * 4
-  GL.vertexAttribPointer (GL.AttribLocation 0)
-    $= (GL.ToFloat, GL.VertexArrayDescriptor componentCount GL.Float stride (plusPtr nullPtr 0))
-  GL.vertexAttribArray (GL.AttribLocation 0) $= GL.Enabled
-  GL.bindVertexArrayObject $= Nothing
-
-  pure (vao, vbo)
-
 isKeyPressed :: GLFW.Window -> GLFW.Key -> IO Bool
 isKeyPressed win key = (== GLFW.KeyState'Pressed) <$> GLFW.getKey win key
 
@@ -159,14 +142,14 @@ updatePlayerAndCamera :: (MonadEnv m, MonadWorld m, MonadIO m) => m ()
 updatePlayerAndCamera = do
   Env {envCamRef, envPlayerRef} <- askEnv
   cam <- liftIO $ readIORef envCamRef
-  let Camera _ front _ _ _ = cam
+  let Camera _ front _ = cam
   dt <- do Env {envTimeRef} <- askEnv; liftIO $ updateTiming envTimeRef
   input <- do Env {envWin} <- askEnv; liftIO $ getKeyboardInput envWin
   player0 <- liftIO $ readIORef envPlayerRef
   player1 <- stepPlayer front input dt player0
   liftIO $ writeIORef envPlayerRef player1
   Player (V3 px py pz) _ <- liftIO $ readIORef envPlayerRef
-  liftIO $ modifyIORef' envCamRef $ \(Camera _ f up pxy ppy) -> Camera (V3 px py (pz + playerEyeHeight)) f up pxy ppy
+  liftIO $ modifyIORef' envCamRef $ \(Camera _ f pxy) -> Camera (V3 px py (pz + playerEyeHeight)) f pxy
 
 updateMouseState :: GLFW.Window -> IORef (Bool, Bool) -> IO (Bool, Bool)
 updateMouseState win clickStateRef = do
@@ -192,7 +175,7 @@ handleMouseClicks = do
   Env {envWin, envCamRef, envClickStateRef} <- askEnv
   (clickL, clickR) <- liftIO $ updateMouseState envWin envClickStateRef
   when (clickL || clickR) $ do
-    Camera camPos camFront _ _ _ <- liftIO $ readIORef envCamRef
+    Camera camPos camFront _ <- liftIO $ readIORef envCamRef
     whenJustM
       (raycastBlock camPos camFront C.interactionDistance)
       ( \(hit, normal) ->
@@ -246,50 +229,22 @@ setupOpenGL win aspectRef = do
   GL.cullFace $= Just GL.Back
   GL.multisample $= GL.Enabled
 
-setupTerrainShader :: SpecialIndices -> GL.TextureObject -> IO (GL.Program, (GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation, GL.UniformLocation))
+setupTerrainShader :: SpecialIndices -> GL.TextureObject -> IO (ProgramU TerrainUs)
 setupTerrainShader spec atlasTex = do
-  terrainProg <- loadTerrainProgramWith spec
-  GL.currentProgram $= Just terrainProg
-  [uView, uProj, uFogColor, uFogStart, uFogEnd, uTime, uAtlas, uAlphaCutoff, uGrassColormap, uFoliageColormap] <-
-    mapM
-      (GL.get . GL.uniformLocation terrainProg)
-      ["uView", "uProj", "uFogColor", "uFogStart", "uFogEnd", "uTime", "uAtlas", "uAlphaCutoff", "uGrassColormap", "uFoliageColormap"]
+  terrainProgU <- loadTerrainProgramWith spec
+  withProgram terrainProgU $ do
+    bindTerrainStatics terrainProgU 0 2 3 0.0
 
-  GL.activeTexture $= GL.TextureUnit 0
-  GL.textureBinding GL.Texture2DArray $= Just atlasTex
-  GL.uniform uAtlas $= GL.TextureUnit 0
+  bindTexture2DArrayAtUnit 0 atlasTex
+  void $ loadTextureAtUnit 2 "resource_pack/assets/minecraft/textures/colormap/grass.png"
+  void $ loadTextureAtUnit 3 "resource_pack/assets/minecraft/textures/colormap/foliage.png"
+  pure terrainProgU
 
-  grassCM <- GL.genObjectName
-  GL.activeTexture $= GL.TextureUnit 2
-  GL.texture GL.Texture2D $= GL.Enabled
-  GL.textureBinding GL.Texture2D $= Just grassCM
-  setupTextureMode GL.Texture2D
-  loadTextureFromPng "resource_pack/assets/minecraft/textures/colormap/grass.png"
-  GL.generateMipmap GL.Texture2D $= GL.Enabled
-  GL.uniform uGrassColormap $= GL.TextureUnit 2
-
-  foliageCM <- GL.genObjectName
-  GL.activeTexture $= GL.TextureUnit 3
-  GL.texture GL.Texture2D $= GL.Enabled
-  GL.textureBinding GL.Texture2D $= Just foliageCM
-  setupTextureMode GL.Texture2D
-  loadTextureFromPng "resource_pack/assets/minecraft/textures/colormap/foliage.png"
-  GL.generateMipmap GL.Texture2D $= GL.Enabled
-  GL.uniform uFoliageColormap $= GL.TextureUnit 3
-
-  GL.uniform uAlphaCutoff $= (0.0 :: GL.GLfloat)
-  pure (terrainProg, (uView, uProj, uFogColor, uFogStart, uFogEnd, uAtlas, uTime, uAlphaCutoff, uGrassColormap, uFoliageColormap))
-
-setupSkyShader :: IO (GL.Program, GL.VertexArrayObject, GL.BufferObject)
+setupSkyShader :: IO (ProgramU SkyUs, Buffer)
 setupSkyShader = do
-  skyProg <- loadSkyProgram
-  GL.currentProgram $= Just skyProg
-  [uSkyTop, uSkyHorizon] <- mapM (GL.get . GL.uniformLocation skyProg) ["uTopColor", "uHorizonColor"]
-
-  let skyTop = GL.Color3 0.45 0.70 (0.95 :: Float)
-      skyHorizon = GL.Color3 0.60 0.78 (0.92 :: Float)
-  GL.uniform uSkyTop $= skyTop
-  GL.uniform uSkyHorizon $= skyHorizon
+  skyProgU <- loadSkyProgram
+  withProgram skyProgU $ do
+    bindSkyStatics skyProgU (V3 0.45 0.70 0.95) (V3 0.60 0.78 0.92)
 
   let skyVerts :: [Float]
       skyVerts =
@@ -306,45 +261,28 @@ setupSkyShader = do
           -1,
           1
         ]
-  (skyVAO, skyVBO) <- createVAOWithVertices skyVerts (2 :: GL.NumComponents)
+  skyBuf <- createBufferWithVertices skyVerts (2 :: GL.NumComponents)
+  pure (skyProgU, skyBuf)
 
-  pure (skyProg, skyVAO, skyVBO)
-
-setupOutlineShader :: IO (GL.Program, GL.VertexArrayObject, GL.BufferObject, GL.UniformLocation, GL.UniformLocation)
+setupOutlineShader :: IO (ProgramU OutlineUs, Buffer)
 setupOutlineShader = do
-  outlineProg <- loadOutlineProgram
-  GL.currentProgram $= Just outlineProg
-  [uOutlineView, uOutlineProj] <- mapM (GL.get . GL.uniformLocation outlineProg) ["uView", "uProj"]
-
-  vao <- GL.genObjectName
-  vbo <- GL.genObjectName
-  GL.bindVertexArrayObject $= Just vao
-  GL.bindBuffer GL.ArrayBuffer $= Just vbo
-
-  -- Preallocate enough for 3 visible faces: 3 * 8 verts * 3 floats
+  outlineProgU <- loadOutlineProgram
   let maxFloats = 72 :: Int
-  GL.bufferData GL.ArrayBuffer $= (fromIntegral (maxFloats * 4), nullPtr, GL.DynamicDraw)
-
+  outlineBuf <- createDynamicBuffer maxFloats GL.DynamicDraw
+  GL.bindVertexArrayObject $= Just (bufVAO outlineBuf)
+  GL.bindBuffer GL.ArrayBuffer $= Just (bufVBO outlineBuf)
   GL.vertexAttribPointer (GL.AttribLocation 0)
     $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float (3 * 4) (plusPtr nullPtr 0))
   GL.vertexAttribArray (GL.AttribLocation 0) $= GL.Enabled
   GL.bindVertexArrayObject $= Nothing
+  pure (outlineProgU, outlineBuf)
 
-  pure (outlineProg, vao, vbo, uOutlineView, uOutlineProj)
-
-setupUIShader :: IO (GL.Program, GL.TextureObject, GL.VertexArrayObject, GL.BufferObject, GL.UniformLocation, GL.UniformLocation)
+setupUIShader :: IO (ProgramU UiUs, GL.TextureObject, Buffer)
 setupUIShader = do
-  uiProg <- loadUIProgram
-  GL.currentProgram $= Just uiProg
-  [uUiTex, uAspect] <- mapM (GL.get . GL.uniformLocation uiProg) ["uUiTex", "uAspect"]
-
-  uiTex <- GL.genObjectName
-  GL.activeTexture $= GL.TextureUnit 1
-  GL.texture GL.Texture2D $= GL.Enabled
-  GL.textureBinding GL.Texture2D $= Just uiTex
-  setupTextureMode GL.Texture2D
-  loadTextureFromPng "resource_pack/assets/minecraft/textures/gui/sprites/hud/crosshair.png"
-  GL.generateMipmap GL.Texture2D $= GL.Enabled
+  uiProgU <- loadUIProgram
+  uiTex <- loadTextureAtUnit 1 "resource_pack/assets/minecraft/textures/gui/sprites/hud/crosshair.png"
+  withProgram uiProgU $ do
+    bindUiStatics uiProgU 1
 
   let crosshairSize = 0.04 :: Float
       vertices :: [Float]
@@ -367,23 +305,12 @@ setupUIShader = do
           1.0
         ]
 
-  (uiVAO, uiVBO) <- createVAOWithVertices vertices (4 :: GL.NumComponents)
-  GL.bindVertexArrayObject $= Just uiVAO
+  uiBuf <- createBufferWithVertices vertices (4 :: GL.NumComponents)
+  GL.bindVertexArrayObject $= Just (bufVAO uiBuf)
   setupPositionUVAttributes
   GL.bindVertexArrayObject $= Nothing
-  GL.activeTexture $= GL.TextureUnit 0
 
-  pure (uiProg, uiTex, uiVAO, uiVBO, uUiTex, uAspect)
-
-initializeGameState :: Float -> Float -> GL.Color3 Float -> GL.UniformLocation -> GL.UniformLocation -> GL.UniformLocation -> IO (IORef WorldState)
-initializeGameState fogStartVal fogEndVal fogColor uFogStart uFogEnd uFogColor = do
-  cmRef <- newIORef initialWorldState
-
-  GL.uniform uFogStart $= fogStartVal
-  GL.uniform uFogEnd $= fogEndVal
-  GL.uniform uFogColor $= fogColor
-
-  pure cmRef
+  pure (uiProgU, uiTex, uiBuf)
 
 initializePlayerAndCamera :: GLFW.Window -> IO (IORef Camera, IORef Player, IORef (Bool, Bool), IORef Double, IORef (Int, Double), IORef Bool, IORef (Map.Map GLFW.Key Bool))
 initializePlayerAndCamera win = do
@@ -405,27 +332,23 @@ initializePlayerAndCamera win = do
 
 updateProjViewAllM :: (MonadEnv m, MonadIO m) => m ()
 updateProjViewAllM = do
-  Env
-    { envCamRef,
-      envAspectRef,
-      envRender = RenderState {rsUProj, rsUView, rsUOutlineProj, rsUOutlineView, rsTerrainProg, rsOutlineProg}
-    } <-
-    askEnv
+  Env {envCamRef, envAspectRef} <- askEnv
   cam <- liftIO $ readIORef envCamRef
   aspect <- liftIO $ readIORef envAspectRef
   let projM = perspective (realToFrac (pi / 3 :: Double)) aspect 0.1 500.0
-      Camera camPos front up _ _ = cam
+      Camera camPos front _ = cam
+      worldUp = V3 0 0 1
+      right = normalize (front `cross` worldUp)
+      up = normalize (right `cross` front)
       viewM = lookAt camPos (camPos + front) up
-  pMat <- liftIO $ toGLMatrix projM
-  vMat <- liftIO $ toGLMatrix viewM
-  liftIO $ do
-    GL.currentProgram $= Just rsTerrainProg
-    GL.uniform rsUProj $= pMat
-    GL.uniform rsUView $= vMat
-    GL.currentProgram $= Just rsOutlineProg
-    GL.uniform rsUOutlineProj $= pMat
-    GL.uniform rsUOutlineView $= vMat
-    GL.currentProgram $= Just rsTerrainProg
+
+  Env {envRender = RenderState {rsTerrainP, rsOutlineP}} <- askEnv
+  withProgram rsTerrainP $ do
+    setMat4 @"uProj" rsTerrainP projM
+    setMat4 @"uView" rsTerrainP viewM
+  withProgram rsOutlineP $ do
+    setMat4 @"uProj" rsTerrainP projM
+    setMat4 @"uView" rsTerrainP viewM
 
 runGame :: IO ()
 runGame = do
@@ -436,19 +359,17 @@ runGame = do
 
   Atlas {atTexture = atlasTex, atLayerOf = layerOf, atOverlayOf = overlayOf, atSpecial = spec} <- buildBlockAtlas
   let atlasIndex = AtlasIndex {aiLayerOf = layerOf, aiOverlayOf = overlayOf}
-  (terrainProg, uniforms) <- setupTerrainShader spec atlasTex
-  (skyProg, skyVAO, skyVBO) <- setupSkyShader
-  (outlineProg, outlineVAO, outlineVBO, uOutlineView, uOutlineProj) <- setupOutlineShader
-  (uiProg, uiTex, uiVAO, uiVBO, uUiTex, uUiAspect) <- setupUIShader
-  GL.currentProgram $= Just terrainProg
+  terrainProgU <- setupTerrainShader spec atlasTex
+  (skyProgU, skyBuf) <- setupSkyShader
+  (outlineProgU, outlineBuf) <- setupOutlineShader
+  (uiProgU, uiTex, uiBuf) <- setupUIShader
 
-  let (uView, uProj, uFogColor, uFogStart, uFogEnd, _, uTime, uAlphaCutoff, _, _) = uniforms
   let workerCount = 3
       texOfF b d = realToFrac (layerOf b d) :: Float
       overlayOfF b d = realToFrac <$> overlayOf b d :: Maybe Float
   cw <- startChunkWorkers workerCount generatedTerrian texOfF overlayOfF
   let cmCfg = mkWorldConfig cw
-  cmRef <- initializeGameState C.fogStart C.fogEnd C.fogColor uFogStart uFogEnd uFogColor
+  cmRef <- newIORef initialWorldState
   (camRef, playerRef, clickStateRef, timeRef, fpsRef, outlineEnabledRef, keyPrevRef) <- initializePlayerAndCamera win
 
   let env =
@@ -466,28 +387,14 @@ runGame = do
             envAspectRef = aspectRef,
             envRender =
               RenderState
-                { rsTerrainProg = terrainProg,
-                  rsUView = uView,
-                  rsUProj = uProj,
-                  rsUFogColor = uFogColor,
-                  rsUFogStart = uFogStart,
-                  rsUFogEnd = uFogEnd,
-                  rsUTime = uTime,
-                  rsSkyProg = skyProg,
-                  rsSkyVAO = skyVAO,
-                  rsSkyVBO = skyVBO,
-                  rsOutlineProg = outlineProg,
-                  rsOutlineVAO = outlineVAO,
-                  rsOutlineVBO = outlineVBO,
-                  rsUOutlineView = uOutlineView,
-                  rsUOutlineProj = uOutlineProj,
-                  rsUIProg = uiProg,
+                { rsTerrainP = terrainProgU,
+                  rsSkyP = skyProgU,
+                  rsSkyBuf = skyBuf,
+                  rsOutlineP = outlineProgU,
+                  rsOutlineBuf = outlineBuf,
+                  rsUIP = uiProgU,
                   rsUITex = uiTex,
-                  rsUIVAO = uiVAO,
-                  rsUIVBO = uiVBO,
-                  rsUUiTex = uUiTex,
-                  rsUUiAspect = uUiAspect,
-                  rsUAlphaCutoff = uAlphaCutoff,
+                  rsUIBuf = uiBuf,
                   rsAtlasTex = atlasTex,
                   rsAtlasIndex = atlasIndex
                 }
@@ -502,8 +409,9 @@ runGame = do
         drawSkyM
         updateProjViewAllM
         currentTime <- liftIO getCurrentTime
-        Env {envRender = RenderState {rsUTime}} <- askEnv
-        liftIO $ GL.uniform rsUTime $= (realToFrac currentTime :: GL.GLfloat)
+        Env {envRender = RenderState {rsTerrainP}} <- askEnv
+        withProgram rsTerrainP $ do
+          setFloat @"uTime" rsTerrainP (realToFrac currentTime)
 
         updatePlayerPosition ppos
         updateChunks
@@ -513,7 +421,7 @@ runGame = do
         drawWorldOpaque chunksDraw
         drawWorldOverlays chunksDraw
         drawWorldLeaves chunksDraw
-        liftIO $ drawWorldWater chunksDraw
+        drawWorldWater chunksDraw
         drawCrosshairUIM
 
         Env {envOutlineRef} <- askEnv
@@ -546,91 +454,70 @@ clearFrame = do
   GL.clear [GL.ColorBuffer, GL.DepthBuffer]
 
 -- Temporarily enable blend for the IO action
-withBlend :: (MonadIO m) => m a -> m ()
-withBlend a =
+withBlend :: (MonadIO m) => m a -> m a
+withBlend a = do
   GL.blend $= GL.Enabled
-    >> GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
-    >> a
-    >> GL.blend $= GL.Disabled
+  GL.blendFunc $= (GL.SrcAlpha, GL.OneMinusSrcAlpha)
+  r <- a
+  GL.blend $= GL.Disabled
+  pure r
 
-withoutFaceCull :: (MonadIO m) => m a -> m ()
-withoutFaceCull a = GL.cullFace $= Nothing >> a >> GL.cullFace $= Just GL.Back
+withoutFaceCull :: (MonadIO m) => m a -> m a
+withoutFaceCull a = do
+  GL.cullFace $= Nothing
+  r <- a
+  GL.cullFace $= Just GL.Back
+  pure r
 
 drawWorldOpaque :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
 drawWorldOpaque chunks = do
-  Env {envRender = RenderState {rsTerrainProg}} <- askEnv
+  Env {envRender = RenderState {rsTerrainP}} <- askEnv
+  withProgram rsTerrainP $ do
+    forM_ (M.elems chunks) $ \h -> do
+      let bm = mOpaque (chMeshes h)
+      drawBuffer bm
 
-  GL.currentProgram $= Just rsTerrainProg
-
-  liftIO $
-    mapM_
-      ( \h -> do
-          let GpuMesh vao _ count = mOpaque (chMeshes h)
-          GL.bindVertexArrayObject $= Just vao
-          GL.drawArrays GL.Triangles 0 (fromIntegral count)
-      )
-      (M.elems chunks)
-
-drawWorldWater :: ChunkMap -> IO ()
-drawWorldWater chunks = withBlend $ do
-  mapM_
-    ( \h -> do
-        let GpuMesh vao _ count = mWater (chMeshes h)
-        GL.bindVertexArrayObject $= Just vao
-        GL.drawArrays GL.Triangles 0 (fromIntegral count)
-    )
-    (M.elems chunks)
+drawWorldWater :: (MonadIO m, MonadEnv m) => ChunkMap -> m ()
+drawWorldWater chunks = do
+  Env {envRender = RenderState {rsTerrainP}} <- askEnv
+  withProgram rsTerrainP $ withBlend $ do
+    forM_ (M.elems chunks) $ \h -> do
+      let bm = mWater (chMeshes h)
+      drawBuffer bm
 
 drawWorldLeaves :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
-drawWorldLeaves chunks = withoutFaceCull $ do
+drawWorldLeaves chunks = do
   -- Alpha cutoff needs to be set here for transparent textures like leaves draw
   -- while still showing transparent textures in the same mesh behind them
-  Env {envRender = RenderState {rsUAlphaCutoff}} <- askEnv
-
-  liftIO $ do
-    GL.uniform rsUAlphaCutoff $= (0.5 :: GL.GLfloat)
-    mapM_
-      ( \h -> do
-          let GpuMesh vao _ count = mLeaves (chMeshes h)
-          GL.bindVertexArrayObject $= Just vao
-          GL.drawArrays GL.Triangles 0 (fromIntegral count)
-      )
-      (M.elems chunks)
-    GL.uniform rsUAlphaCutoff $= (0.0 :: GL.GLfloat)
+  Env {envRender = RenderState {rsTerrainP}} <- askEnv
+  withProgram rsTerrainP $ withoutFaceCull $ do
+    setFloat @"uAlphaCutoff" rsTerrainP 0.5
+    forM_ (M.elems chunks) $ \h -> do
+      let bm = mLeaves (chMeshes h)
+      drawBuffer bm
+    setFloat @"uAlphaCutoff" rsTerrainP 0.0
 
 drawWorldOverlays :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
 drawWorldOverlays chunks = do
-  Env {envRender = RenderState {rsUAlphaCutoff}} <- askEnv
-
-  liftIO $ do
-    GL.uniform rsUAlphaCutoff $= (0.5 :: GL.GLfloat)
-    mapM_
-      ( \h -> do
-          let GpuMesh vao _ count = mGrassOverlay (chMeshes h)
-          GL.bindVertexArrayObject $= Just vao
-          GL.drawArrays GL.Triangles 0 (fromIntegral count)
-      )
-      (M.elems chunks)
-    GL.uniform rsUAlphaCutoff $= (0.0 :: GL.GLfloat)
+  Env {envRender = RenderState {rsTerrainP}} <- askEnv
+  withProgram rsTerrainP $ do
+    setFloat @"uAlphaCutoff" rsTerrainP 0.5
+    forM_ (M.elems chunks) $ \h -> do
+      let bm = mGrassOverlay (chMeshes h)
+      drawBuffer bm
+    setFloat @"uAlphaCutoff" rsTerrainP 0.0
 
 drawCrosshairUIM :: (MonadEnv m, MonadIO m) => m ()
 drawCrosshairUIM = withBlend $ do
-  Env {envAspectRef, envRender = RenderState {rsUIProg, rsUITex, rsUIVAO, rsUUiTex, rsUUiAspect, rsTerrainProg}} <- askEnv
-  liftIO $ do
-    GL.currentProgram $= Just rsUIProg
-    GL.activeTexture $= GL.TextureUnit 1
+  Env {envAspectRef, envRender = RenderState {rsUIP, rsUITex, rsUIBuf}} <- askEnv
+  withProgram rsUIP $ withTextureUnit 1 $ do
     GL.textureBinding GL.Texture2D $= Just rsUITex
-    GL.uniform rsUUiTex $= GL.TextureUnit 1
-
     aspect <- readIORef envAspectRef
-    GL.uniform rsUUiAspect $= (realToFrac aspect :: GL.GLfloat)
+    setFloat @"uAspect" rsUIP aspect
 
-    GL.bindVertexArrayObject $= Just rsUIVAO
-    GL.drawArrays GL.TriangleFan 0 4
+    drawBufferAs GL.TriangleFan rsUIBuf
 
     GL.bindVertexArrayObject $= Nothing
-    GL.currentProgram $= Just rsTerrainProg
-    GL.activeTexture $= GL.TextureUnit 0
 
 generateBlockOutlineVerticesM :: (MonadWorld m) => V3 Int -> V3 Float -> m [Float]
 generateBlockOutlineVerticesM blk camPos = do
@@ -688,26 +575,15 @@ generateBlockOutlineVerticesM blk camPos = do
 
 drawBlockOutlineM :: (MonadEnv m, MonadWorld m, MonadIO m) => m ()
 drawBlockOutlineM = do
-  Env
-    { envCamRef,
-      envRender = RenderState {rsOutlineProg, rsOutlineVAO, rsOutlineVBO}
-    } <-
-    askEnv
-  Camera camPos camFront _ _ _ <- liftIO $ readIORef envCamRef
+  Env {envCamRef, envRender = RenderState {rsOutlineP, rsOutlineBuf}} <- askEnv
+  Camera camPos camFront _ <- liftIO $ readIORef envCamRef
   whenJustM
     (raycastBlock camPos camFront C.interactionDistance)
     ( \(hitPos, _) -> do
         vertices <- generateBlockOutlineVerticesM hitPos camPos
-        liftIO $ do
-          GL.currentProgram $= Just rsOutlineProg
-          GL.bindVertexArrayObject $= Just rsOutlineVAO
-          GL.bindBuffer GL.ArrayBuffer $= Just rsOutlineVBO
-          withArray vertices $ \ptr -> do
-            let bytes = (fromIntegral (length vertices * 4) :: GL.GLsizeiptr)
-            GL.bufferSubData GL.ArrayBuffer GL.WriteToBuffer (0 :: GL.GLintptr) bytes ptr
-          GL.polygonMode $= (GL.Line, GL.Line)
-          GL.lineWidth $= 2.0
-          GL.drawArrays GL.Lines 0 (fromIntegral (length vertices `div` 3))
+        withProgram rsOutlineP $ do
+          bufferSubDataFloats rsOutlineBuf vertices
+          drawBufferCount GL.Lines (length vertices `div` 3) rsOutlineBuf
           GL.polygonMode $= (GL.Fill, GL.Fill)
           GL.bindVertexArrayObject $= Nothing
     )
@@ -732,11 +608,8 @@ updateFpsTitleM = do
 
 drawSkyM :: (MonadEnv m, MonadIO m) => m ()
 drawSkyM = do
-  Env {envRender = RenderState {rsSkyProg, rsSkyVAO, rsSkyVBO}} <- askEnv
-  liftIO $ do
+  Env {envRender = RenderState {rsSkyP, rsSkyBuf}} <- askEnv
+  withProgram rsSkyP $ do
     GL.depthFunc $= Nothing
-    GL.currentProgram $= Just rsSkyProg
-    GL.bindVertexArrayObject $= Just rsSkyVAO
-    GL.bindBuffer GL.ArrayBuffer $= Just rsSkyVBO
-    GL.drawArrays GL.Triangles 0 6
+    drawBuffer rsSkyBuf
     GL.depthFunc $= Just GL.Lequal
