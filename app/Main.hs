@@ -28,10 +28,10 @@ import Rendering.Camera
 import Rendering.Mesh (Mesh (..))
 import Rendering.Render (AtlasIndex (..), MonadRender (..), RenderState (..))
 import Rendering.Shader.Outline (OutlineUs, loadOutlineProgram)
-import Rendering.Shader.Sky (SkyUs, bindSkyStatics, loadSkyProgram)
-import Rendering.Shader.Terrain (TerrainUs, bindTerrainStatics, loadTerrainProgramWith)
+import Rendering.Shader.Sky (SkyUs, loadSkyProgram)
+import Rendering.Shader.Terrain (TerrainUs, loadTerrainProgram)
 import Rendering.Shader.Typed (ProgramU (..), setFloat, setMat4, withProgram)
-import Rendering.Shader.UI (UiUs, bindUiStatics, loadUIProgram)
+import Rendering.Shader.UI (UiUs, loadUIProgram)
 import Rendering.Texture (bindTexture2DArrayAtUnit, loadTextureAtUnit)
 import Utils.Monad
 
@@ -231,10 +231,8 @@ setupOpenGL win aspectRef = do
 
 setupTerrainShader :: SpecialIndices -> GL.TextureObject -> IO (ProgramU TerrainUs)
 setupTerrainShader spec atlasTex = do
-  terrainProgU <- loadTerrainProgramWith spec
-  withProgram terrainProgU $ do
-    bindTerrainStatics terrainProgU 0 2 3 0.0
-
+  terrainProgU <- loadTerrainProgram spec 0 2 3 0.0
+  
   bindTexture2DArrayAtUnit 0 atlasTex
   void $ loadTextureAtUnit 2 "resource_pack/assets/minecraft/textures/colormap/grass.png"
   void $ loadTextureAtUnit 3 "resource_pack/assets/minecraft/textures/colormap/foliage.png"
@@ -242,9 +240,7 @@ setupTerrainShader spec atlasTex = do
 
 setupSkyShader :: IO (ProgramU SkyUs, Buffer)
 setupSkyShader = do
-  skyProgU <- loadSkyProgram
-  withProgram skyProgU $ do
-    bindSkyStatics skyProgU (V3 0.45 0.70 0.95) (V3 0.60 0.78 0.92)
+  skyProgU <- loadSkyProgram (V3 0.45 0.70 0.95) (V3 0.60 0.78 0.92)
 
   let skyVerts :: [Float]
       skyVerts =
@@ -279,10 +275,8 @@ setupOutlineShader = do
 
 setupUIShader :: IO (ProgramU UiUs, GL.TextureObject, Buffer)
 setupUIShader = do
-  uiProgU <- loadUIProgram
+  uiProgU <- loadUIProgram 1
   uiTex <- loadTextureAtUnit 1 "resource_pack/assets/minecraft/textures/gui/sprites/hud/crosshair.png"
-  withProgram uiProgU $ do
-    bindUiStatics uiProgU 1
 
   let crosshairSize = 0.04 :: Float
       vertices :: [Float]
@@ -501,11 +495,9 @@ drawWorldOverlays :: (MonadEnv m, MonadIO m) => ChunkMap -> m ()
 drawWorldOverlays chunks = do
   Env {envRender = RenderState {rsTerrainP}} <- askEnv
   withProgram rsTerrainP $ do
-    setFloat @"uAlphaCutoff" rsTerrainP 0.5
     forM_ (M.elems chunks) $ \h -> do
       let bm = mGrassOverlay (chMeshes h)
       drawBuffer bm
-    setFloat @"uAlphaCutoff" rsTerrainP 0.0
 
 drawCrosshairUIM :: (MonadEnv m, MonadIO m) => m ()
 drawCrosshairUIM = withBlend $ do

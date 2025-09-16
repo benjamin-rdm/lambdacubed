@@ -5,8 +5,7 @@
 
 module Rendering.Shader.UI
   ( UiUs,
-    loadUIProgram,
-    bindUiStatics,
+    loadUIProgram
   )
 where
 
@@ -38,11 +37,10 @@ uiFragmentT = do
     discardT
   assignN frag (use c)
 
-loadUIProgram :: IO (ProgramU UiUs)
-loadUIProgram = do
+loadUIProgram :: Int -> IO (ProgramU UiUs)
+loadUIProgram unit = do
   let vsrc = toSrc (runVertexT uiVertexT)
       fsrc = toSrc (runFragmentT uiFragmentT)
-  ProgramU <$> loadProgramFromSources vsrc fsrc
-
-bindUiStatics :: ProgramU UiUs -> Int -> IO ()
-bindUiStatics p i = setSampler2D @"uUiTex" p (GL.TextureUnit (fromIntegral i))
+  pu <- ProgramU <$> loadProgramFromSources vsrc fsrc
+  withProgram pu $ setSampler2D @"uUiTex" pu (GL.TextureUnit (fromIntegral unit))
+  pure pu

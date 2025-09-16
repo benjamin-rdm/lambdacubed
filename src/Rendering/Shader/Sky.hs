@@ -5,8 +5,7 @@
 
 module Rendering.Shader.Sky
   ( SkyUs,
-    loadSkyProgram,
-    bindSkyStatics,
+    loadSkyProgram
   )
 where
 
@@ -34,13 +33,12 @@ skyFragmentT = do
   c <- localV3 "c" (Just (mixV3 (use uHor) (use uTop) (use t)))
   assignN frag (vec4 (use c, 1.0 :: Double))
 
-loadSkyProgram :: IO (ProgramU SkyUs)
-loadSkyProgram = do
+loadSkyProgram :: L.V3 Float -> L.V3 Float -> IO (ProgramU SkyUs)
+loadSkyProgram topColor horizonColor = do
   let vsrc = toSrc (runVertexT skyVertexT)
       fsrc = toSrc (runFragmentT skyFragmentT)
-  ProgramU <$> loadProgramFromSources vsrc fsrc
-
-bindSkyStatics :: ProgramU SkyUs -> L.V3 Float -> L.V3 Float -> IO ()
-bindSkyStatics pu topColor horizonColor = do
-  setV3 @"uTopColor" pu topColor
-  setV3 @"uHorizonColor" pu horizonColor
+  pu <- ProgramU <$> loadProgramFromSources vsrc fsrc
+  withProgram pu $ do
+    setV3 @"uTopColor" pu topColor
+    setV3 @"uHorizonColor" pu horizonColor
+  pure pu

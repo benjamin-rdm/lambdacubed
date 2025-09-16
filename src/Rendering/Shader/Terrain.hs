@@ -3,8 +3,9 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Rendering.Shader.Terrain (loadTerrainProgramWith, TerrainVertexT, TerrainFragmentT, TerrainUs, bindTerrainStatics) where
+module Rendering.Shader.Terrain (loadTerrainProgram, TerrainVertexT, TerrainFragmentT, TerrainUs) where
 
+import App.Config
 import Data.Set qualified as S
 import Game.Block.Atlas (SpecialIndices (..))
 import Graphics.Rendering.OpenGL.GL qualified as GL
@@ -26,13 +27,6 @@ type TerrainFragmentT =
    ]
 
 type TerrainUs = AppendPairs TerrainVertexT TerrainFragmentT
-
-bindTerrainStatics :: ProgramU TerrainUs -> Int -> Int -> Int -> Float -> IO ()
-bindTerrainStatics pu atlasUnit grassUnit foliageUnit alphaCut = do
-  setSampler2DArray @"uAtlas" pu (GL.TextureUnit (fromIntegral atlasUnit))
-  setSampler2D @"uGrassColormap" pu (GL.TextureUnit (fromIntegral grassUnit))
-  setSampler2D @"uFoliageColormap" pu (GL.TextureUnit (fromIntegral foliageUnit))
-  setFloat @"uAlphaCutoff" pu alphaCut
 
 terrainVertexT :: ShaderT TerrainVertexT ()
 terrainVertexT = do
@@ -107,8 +101,19 @@ terrainFragmentT spec = do
   rgbCol <- localV3 "rgb" (Just (mixV3 (rgb (use base)) (use uFogColor) (use fog)))
   assignN frag (vec4 (use rgbCol, a (use base)))
 
-loadTerrainProgramWith :: SpecialIndices -> IO (ProgramU TerrainUs)
-loadTerrainProgramWith spec = do
+loadTerrainProgram :: SpecialIndices -> Int -> Int -> Int -> Float -> IO (ProgramU TerrainUs)
+loadTerrainProgram spec atlasUnit grassUnit foliageUnit alphaCut = do
   let vsrc = toSrc (runVertexT terrainVertexT)
       fsrc = toSrc (runFragmentT (terrainFragmentT spec))
-  ProgramU <$> loadProgramFromSources vsrc fsrc
+  pu <- ProgramU <$> loadProgramFromSources vsrc fsrc
+
+  withProgram pu $ do
+    setSampler2DArray @"uAtlas" pu (GL.TextureUnit (fromIntegral atlasUnit))
+    setSampler2D @"uGrassColormap" pu (GL.TextureUnit (fromIntegral grassUnit))
+    setSampler2D @"uFoliageColormap" pu (GL.TextureUnit (fromIntegral foliageUnit))
+    setFloat @"uAlphaCutoff" pu alphaCut
+    setV3 @"uFogColor" pu fogColor
+    setFloat @"uFogStart" pu fogStart
+    setFloat @"uFogEnd" pu fogEnd
+
+  pure pu
