@@ -6,12 +6,11 @@ module App.Config
     fogColor,
     renderDistance,
     interactionDistance,
-    chunkSize
+    chunkSize,
   )
 where
 
-import Graphics.Rendering.OpenGL.GL qualified as GL
-import Linear (V3(..))
+import Linear (V3 (..))
 
 windowWidth :: Int
 windowWidth = 1280
@@ -25,8 +24,8 @@ fogStart = 192
 fogEnd :: Float
 fogEnd = 256
 
-fogColor :: GL.Color3 Float
-fogColor = GL.Color3 0.5 0.65 0.85
+fogColor :: V3 Float
+fogColor = V3 0.60 0.78 0.92
 
 renderDistance :: Int
 renderDistance = 6

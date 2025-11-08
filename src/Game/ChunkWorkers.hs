@@ -11,9 +11,9 @@ import App.Config
 import Control.Concurrent.Async (async, link)
 import Control.Concurrent.STM
 import Control.DeepSeq (force)
-import Data.Vector.Storable qualified as VS
 import Game.Direction (Direction)
 import Game.World
+import Game.World.Mesh
 import Game.WorldSource
 import Linear
 import Rendering.Mesh (Mesh (..))
@@ -24,7 +24,7 @@ data PreparedChunk = PreparedChunk
   { pcCoord :: !(V2 Int),
     pcOrigin :: !(V3 Int),
     pcTerrain :: !TerrainChunk,
-    pcMeshes :: !(Mesh (VS.Vector Float))
+    pcMeshes :: !(Mesh TerrainVertices)
   }
 
 data ChunkWorkers = ChunkWorkers
@@ -69,6 +69,7 @@ workerLoop coordQ resQ ws texOf overlayOf = do
       prepared = PreparedChunk coord origin terrain (Mesh opaque water leaves grass)
   -- This forces the evalation of the meshes on the worker thread
   let Mesh o w l g = pcMeshes prepared
-  !_ <- pure (force (VS.length o + VS.length w + VS.length l + VS.length g))
+      forceLengths = verticesLength o + verticesLength w + verticesLength l + verticesLength g
+  !_ <- pure (force forceLengths)
   atomically $ writeTBQueue resQ prepared
   workerLoop coordQ resQ ws texOf overlayOf

@@ -4,31 +4,41 @@
 {-# LANGUAGE TypeApplications #-}
 
 module Rendering.Shader.Outline
-  ( OutlineUs,
+  ( OutlineVertexIs,
+    OutlineUs,
     loadOutlineProgram
   )
 where
 
 import Rendering.Shader.AST
 import Rendering.Shader.Typed
-import Rendering.Shader.Utils
 
-type OutlineUs = AppendPairs '[ '("uView", 'Mat4), '("uProj", 'Mat4) ] '[]
+type OutlineVertexIs = '[ '("aPos", 'V3) ]
 
-outlineVertexT :: ShaderT '[ '("uView", 'Mat4), '("uProj", 'Mat4)] ()
+type OutlineVertexUs = '[ '("uView", 'Mat4), '("uProj", 'Mat4) ]
+
+type OutlineVertexOs = '[]
+
+type OutlineFragmentIs = '[]
+
+type OutlineFragmentUs = '[]
+
+type OutlineFragmentOs = '[ '("FragColor", 'V4) ]
+
+type OutlineUs = AppendPairs OutlineVertexUs OutlineFragmentUs
+
+outlineVertexT :: ShaderT OutlineVertexIs OutlineVertexOs OutlineVertexUs ()
 outlineVertexT = do
-  aPos <- inV3 "aPos"
+  aPos <- inV3 @"aPos"
   uView <- uniformMat4 @"uView"
   uProj <- uniformMat4 @"uProj"
   assignGLPosition ((use uProj .*. use uView) .*. vec4 (use aPos, 1.0 :: Double))
 
-outlineFragmentT :: ShaderT '[] ()
+outlineFragmentT :: ShaderT OutlineFragmentIs OutlineFragmentOs OutlineFragmentUs ()
 outlineFragmentT = do
-  frag <- outV4 "FragColor"
-  assignN frag (vec4 (0.0 :: Double, 0.0 :: Double, 0.0 :: Double, 1.0 :: Double))
+  frag <- outV4 @"FragColor"
+  assign frag (vec4 (0.0 :: Double, 0.0 :: Double, 0.0 :: Double, 1.0 :: Double))
 
-loadOutlineProgram :: IO (ProgramU OutlineUs)
+loadOutlineProgram :: IO (ProgramU OutlineVertexIs OutlineUs)
 loadOutlineProgram = do
-  let vsrc = toSrc (runVertexT outlineVertexT)
-      fsrc = toSrc (runFragmentT outlineFragmentT)
-  ProgramU <$> loadProgramFromSources vsrc fsrc
+  loadProgram outlineVertexT outlineFragmentT

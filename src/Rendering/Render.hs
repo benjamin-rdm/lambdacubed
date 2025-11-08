@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+
 module Rendering.Render
   ( MonadRender (..),
     AtlasIndex (..),
@@ -9,11 +11,11 @@ import Game.Direction (Direction)
 import Game.World (Block)
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Rendering.Buffer (Buffer)
-import Rendering.Shader.Outline (OutlineUs)
-import Rendering.Shader.Sky (SkyUs)
-import Rendering.Shader.Terrain (TerrainUs)
+import Rendering.Shader.Outline (OutlineUs, OutlineVertexIs)
+import Rendering.Shader.Sky (SkyUs, SkyVertexIs)
+import Rendering.Shader.Terrain (TerrainUs, TerrainVertexIs)
 import Rendering.Shader.Typed (ProgramU)
-import Rendering.Shader.UI (UiUs)
+import Rendering.Shader.UI (UiUs, UiVertexIs)
 
 class (Monad m) => MonadRender m where
   askRender :: m RenderState
@@ -34,14 +36,14 @@ data AtlasIndex = AtlasIndex
   }
 
 data RenderState = RenderState
-  { rsTerrainP :: !(ProgramU TerrainUs),
-    rsSkyP :: !(ProgramU SkyUs),
-    rsSkyBuf :: !Buffer,
-    rsOutlineP :: !(ProgramU OutlineUs),
-    rsOutlineBuf :: !Buffer,
-    rsUIP :: !(ProgramU UiUs),
+  { rsTerrainP :: !(ProgramU TerrainVertexIs TerrainUs),
+    rsSkyP :: !(ProgramU SkyVertexIs SkyUs),
+    rsSkyBuf :: !(Buffer SkyVertexIs),
+    rsOutlineP :: !(ProgramU OutlineVertexIs OutlineUs),
+    rsOutlineBuf :: !(Buffer OutlineVertexIs),
+    rsUIP :: !(ProgramU UiVertexIs UiUs),
     rsUITex :: !GL.TextureObject,
-    rsUIBuf :: !Buffer,
+    rsUIBuf :: !(Buffer UiVertexIs),
     rsAtlasTex :: !GL.TextureObject,
     rsAtlasIndex :: !AtlasIndex
   }

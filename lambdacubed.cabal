@@ -47,6 +47,7 @@ executable lambdacubed-exe
     Game.Direction
     Game.Physics
     Game.World
+    Game.World.Mesh
     Game.WorldManager
     Game.WorldSource
     Rendering.Buffer

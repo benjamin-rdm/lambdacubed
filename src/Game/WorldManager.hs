@@ -17,20 +17,21 @@ where
 
 import App.Config
 import Control.Concurrent.STM (STM, atomically)
-import Control.Monad (filterM, replicateM)
+import Control.Monad (filterM, replicateM, forM_)
 import Control.Monad.Reader
 import Control.Monad.State.Strict
 import Data.Map.Strict qualified as M
 import Data.Maybe (catMaybes)
 import Data.Set qualified as S
-import Data.Vector.Storable qualified as VS
 import Game.ChunkWorkers (ChunkWorkers (..), PreparedChunk (..), requestChunk, tryPopPrepared)
 import Game.World
+import Game.World.Mesh
 import Rendering.Render (MonadRender(..))
 import Game.WorldSource
 import Linear hiding (nearZero)
 import Rendering.Mesh (Mesh (..))
 import Utils.Monad
+import Rendering.Buffer (deleteBuffer)
 
 calculateDistance :: V2 Int -> V2 Int -> Float
 calculateDistance a b = sqrt $ fromIntegral $ quadrance (a - b)
@@ -86,7 +87,7 @@ mkWorldConfig :: ChunkWorkers -> WorldConfig
 mkWorldConfig cw =
   WorldConfig
     { cmcRenderDistance = renderDistance,
-      cmcMaxChunksPerFrame = 3,
+      cmcMaxChunksPerFrame = 1,
       cmcWorldSource = generatedTerrian,
       cmcWorkers = cw
     }
@@ -171,13 +172,12 @@ instance (MonadIO m, MonadRender m) => MonadWorld (WorldT m) where
     liftSTM $ mapM_ (requestChunk cw) scheduled
     modify $ \s -> s {cmsPending = S.union (cmsPending s) (S.fromList scheduled)}
     prepared <- liftSTM $ replicateM maxPerFrame (tryPopPrepared cw)
-    mapM_
-      ( \pc -> do
-          deletePendingChunk (pcCoord pc)
-          h <- liftIO $ finalizePrepared pc
-          insertLoadedChunk (pcCoord pc) h
-      )
-      (catMaybes prepared)
+    
+    forM_ (catMaybes prepared) $ \pc -> do
+      deletePendingChunk (pcCoord pc)
+      h <- liftIO $ finalizePrepared pc
+      insertLoadedChunk (pcCoord pc) h
+      
     cs <- gets cmsLoadedChunks
     mapM_ (unloadChunkHandle . (cs M.!)) (take maxPerFrame toUnload)
 
@@ -204,20 +204,20 @@ finalizePrepared PreparedChunk {pcCoord, pcOrigin, pcTerrain, pcMeshes} = do
   gpuMeshes <- uploadGpuMeshes pcMeshes
   return (ChunkHandle pcCoord pcOrigin pcTerrain gpuMeshes)
 
-uploadGpuMeshes :: (MonadIO m) => Mesh (VS.Vector Float) -> m (Mesh GpuMesh)
-uploadGpuMeshes (Mesh o w l g) = do
-  opaqueMesh <- liftIO $ uploadGpuMesh o
-  waterMesh <- liftIO $ uploadGpuMesh w
-  leavesMesh <- liftIO $ uploadGpuMesh l
-  overlayMesh <- liftIO $ uploadGpuMesh g
+uploadGpuMeshes :: (MonadIO m) => Mesh TerrainVertices -> m (Mesh GpuMesh)
+uploadGpuMeshes (Mesh o w l g) = liftIO $ do
+  opaqueMesh <- uploadGpuMesh o
+  waterMesh <- uploadGpuMesh w
+  leavesMesh <- uploadGpuMesh l
+  overlayMesh <- uploadGpuMesh g
   return (Mesh opaqueMesh waterMesh leavesMesh overlayMesh)
 
 deleteGpuMeshes :: (MonadIO m) => Mesh GpuMesh -> WorldT m ()
-deleteGpuMeshes (Mesh om wm lm gom) = do
-  liftIO $ deleteGpuMesh om
-  liftIO $ deleteGpuMesh wm
-  liftIO $ deleteGpuMesh lm
-  liftIO $ deleteGpuMesh gom
+deleteGpuMeshes (Mesh om wm lm gom) = liftIO $ do
+  deleteBuffer om
+  deleteBuffer wm
+  deleteBuffer lm
+  deleteBuffer gom
 
 unloadChunkHandle :: (MonadIO m) => ChunkHandle -> WorldT m ()
 unloadChunkHandle (ChunkHandle coord _ _ mesh) = do
