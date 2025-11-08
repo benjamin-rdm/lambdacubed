@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Main (main) where
 
@@ -11,10 +12,10 @@ import Data.Foldable (forM_)
 import Data.IORef
 import Data.Map.Strict qualified as M
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe)
-import Foreign.Ptr (nullPtr, plusPtr)
+import Data.Maybe (catMaybes, fromMaybe)
 import Game.Block.Atlas (Atlas (..), SpecialIndices (..), buildBlockAtlas)
 import Game.ChunkWorkers
+import Game.Direction
 import Game.Physics
 import Game.World
 import Game.WorldManager
@@ -23,15 +24,15 @@ import Graphics.Rendering.OpenGL (($=))
 import Graphics.Rendering.OpenGL.GL qualified as GL
 import Graphics.UI.GLFW qualified as GLFW
 import Linear
-import Rendering.Buffer (Buffer (..), bufferSubDataFloats, createBufferWithVertices, createDynamicBuffer, drawBuffer, drawBufferAs, drawBufferCount)
+import Rendering.Buffer
 import Rendering.Camera
 import Rendering.Mesh (Mesh (..))
 import Rendering.Render (AtlasIndex (..), MonadRender (..), RenderState (..))
-import Rendering.Shader.Outline (OutlineUs, loadOutlineProgram)
-import Rendering.Shader.Sky (SkyUs, loadSkyProgram)
-import Rendering.Shader.Terrain (TerrainUs, loadTerrainProgram)
+import Rendering.Shader.Outline (OutlineUs, OutlineVertexIs, loadOutlineProgram)
+import Rendering.Shader.Sky (SkyUs, SkyVertexIs, loadSkyProgram)
+import Rendering.Shader.Terrain (TerrainUs, TerrainVertexIs, loadTerrainProgram)
 import Rendering.Shader.Typed (ProgramU (..), setFloat, setMat4, withProgram)
-import Rendering.Shader.UI (UiUs, loadUIProgram)
+import Rendering.Shader.UI (UiUs, UiVertexIs, loadUIProgram)
 import Rendering.Texture (bindTexture2DArrayAtUnit, loadTextureAtUnit)
 import Utils.Monad
 
@@ -92,15 +93,6 @@ getWindowAspectRatio :: GLFW.Window -> IO Float
 getWindowAspectRatio win = do
   (w, h) <- GLFW.getFramebufferSize win
   pure $ if h == 0 then 1 else fromIntegral w / fromIntegral h
-
-setupPositionUVAttributes :: IO ()
-setupPositionUVAttributes = do
-  GL.vertexAttribPointer (GL.AttribLocation 0)
-    $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float (4 * 4) (plusPtr nullPtr 0))
-  GL.vertexAttribArray (GL.AttribLocation 0) $= GL.Enabled
-  GL.vertexAttribPointer (GL.AttribLocation 1)
-    $= (GL.ToFloat, GL.VertexArrayDescriptor 2 GL.Float (4 * 4) (plusPtr nullPtr (2 * 4)))
-  GL.vertexAttribArray (GL.AttribLocation 1) $= GL.Enabled
 
 isKeyPressed :: GLFW.Window -> GLFW.Key -> IO Bool
 isKeyPressed win key = (== GLFW.KeyState'Pressed) <$> GLFW.getKey win key
@@ -229,80 +221,50 @@ setupOpenGL win aspectRef = do
   GL.cullFace $= Just GL.Back
   GL.multisample $= GL.Enabled
 
-setupTerrainShader :: SpecialIndices -> GL.TextureObject -> IO (ProgramU TerrainUs)
+setupTerrainShader :: SpecialIndices -> GL.TextureObject -> IO (ProgramU TerrainVertexIs TerrainUs)
 setupTerrainShader spec atlasTex = do
   terrainProgU <- loadTerrainProgram spec 0 2 3 0.0
-  
+
   bindTexture2DArrayAtUnit 0 atlasTex
   void $ loadTextureAtUnit 2 "resource_pack/assets/minecraft/textures/colormap/grass.png"
   void $ loadTextureAtUnit 3 "resource_pack/assets/minecraft/textures/colormap/foliage.png"
   pure terrainProgU
 
-setupSkyShader :: IO (ProgramU SkyUs, Buffer)
+setupSkyShader :: IO (ProgramU SkyVertexIs SkyUs, Buffer SkyVertexIs)
 setupSkyShader = do
   skyProgU <- loadSkyProgram (V3 0.45 0.70 0.95) (V3 0.60 0.78 0.92)
 
-  let skyVerts :: [Float]
-      skyVerts =
-        [ -1,
-          -1,
-          1,
-          -1,
-          1,
-          1,
-          -1,
-          -1,
-          1,
-          1,
-          -1,
-          1
-        ]
-  skyBuf <- createBufferWithVertices skyVerts (2 :: GL.NumComponents)
+  let skyVerts :: [V2 Float]
+      skyVerts = [V2 (-1) (-1), V2 1 (-1), V2 1 1, V2 (-1) (-1), V2 1 1, V2 (-1) 1]
+
+  skyBuf <- bufferWithVerticesFor @SkyVertexIs skyVerts
   pure (skyProgU, skyBuf)
 
-setupOutlineShader :: IO (ProgramU OutlineUs, Buffer)
+setupOutlineShader :: IO (ProgramU OutlineVertexIs OutlineUs, Buffer OutlineVertexIs)
 setupOutlineShader = do
   outlineProgU <- loadOutlineProgram
   let maxFloats = 72 :: Int
-  outlineBuf <- createDynamicBuffer maxFloats GL.DynamicDraw
-  GL.bindVertexArrayObject $= Just (bufVAO outlineBuf)
-  GL.bindBuffer GL.ArrayBuffer $= Just (bufVBO outlineBuf)
-  GL.vertexAttribPointer (GL.AttribLocation 0)
-    $= (GL.ToFloat, GL.VertexArrayDescriptor 3 GL.Float (3 * 4) (plusPtr nullPtr 0))
-  GL.vertexAttribArray (GL.AttribLocation 0) $= GL.Enabled
-  GL.bindVertexArrayObject $= Nothing
+      compsPerVertex = floatsPerVertex @OutlineVertexIs
+      maxVertices = maxFloats `div` compsPerVertex
+
+  outlineBuf <- createDynamicBufferFor @OutlineVertexIs maxVertices GL.DynamicDraw
   pure (outlineProgU, outlineBuf)
 
-setupUIShader :: IO (ProgramU UiUs, GL.TextureObject, Buffer)
+setupUIShader :: IO (ProgramU UiVertexIs UiUs, GL.TextureObject, Buffer UiVertexIs)
 setupUIShader = do
   uiProgU <- loadUIProgram 1
   uiTex <- loadTextureAtUnit 1 "resource_pack/assets/minecraft/textures/gui/sprites/hud/crosshair.png"
 
   let crosshairSize = 0.04 :: Float
-      vertices :: [Float]
+      vertices :: [V4 Float]
       vertices =
-        [ -crosshairSize,
-          -crosshairSize,
-          0.0,
-          0.0,
-          crosshairSize,
-          -crosshairSize,
-          1.0,
-          0.0,
-          crosshairSize,
-          crosshairSize,
-          1.0,
-          1.0,
-          -crosshairSize,
-          crosshairSize,
-          0.0,
-          1.0
+        [ V4 (-crosshairSize) (-crosshairSize) 0.0 0.0,
+          V4 crosshairSize (-crosshairSize) 1.0 0.0,
+          V4 crosshairSize crosshairSize 1.0 1.0,
+          V4 (-crosshairSize) crosshairSize 0.0 1.0
         ]
 
-  uiBuf <- createBufferWithVertices vertices (4 :: GL.NumComponents)
-  GL.bindVertexArrayObject $= Just (bufVAO uiBuf)
-  setupPositionUVAttributes
-  GL.bindVertexArrayObject $= Nothing
+  uiBuf <- bufferWithVerticesFor @UiVertexIs vertices
 
   pure (uiProgU, uiTex, uiBuf)
 
@@ -507,13 +469,14 @@ drawCrosshairUIM = withBlend $ do
     setFloat @"uAspect" rsUIP aspect
     drawBufferAs GL.TriangleFan rsUIBuf
 
-generateBlockOutlineVerticesM :: (MonadWorld m) => V3 Int -> V3 Float -> m [Float]
-generateBlockOutlineVerticesM blk camPos = do
+generateBlockOutlineVertices :: (MonadWorld m) => V3 Int -> V3 Float -> m [V3 Float]
+generateBlockOutlineVertices blk camPos = do
   let blkF@(V3 fx fy fz) = fromIntegral <$> blk
 
   let blockCenter = blkF + V3 0.5 0.5 0.5
       toCam = normalize (camPos - blockCenter)
-      faceFacingCamera normal = toCam `dot` (realToFrac <$> normal) > 0
+      faceFacingCamera :: V3 Float -> Bool
+      faceFacingCamera normalVec = toCam `dot` normalVec > 0
 
       p000 = V3 fx fy fz
       p100 = V3 (fx + 1) fy fz
@@ -524,42 +487,28 @@ generateBlockOutlineVerticesM blk camPos = do
       p111 = V3 (fx + 1) (fy + 1) (fz + 1)
       p011 = V3 fx (fy + 1) (fz + 1)
 
-      loopEdges :: [V3 Float] -> [Float]
-      loopEdges [a, b, c, d] =
-        let pairs = [(a, b), (b, c), (c, d), (d, a)]
-         in concatMap (\(V3 ax ay az, V3 bx by bz) -> [ax, ay, az, bx, by, bz]) pairs
+      loopEdges :: [V3 Float] -> [V3 Float]
+      loopEdges [a, b, c, d] = [a, b, b, c, c, d, d, a]
       loopEdges _ = []
 
-      bottomN = V3 0 0 (-1)
-      topN = V3 0 0 1
-      leftN = V3 (-1) 0 0
-      rightN = V3 1 0 0
-      frontN = V3 0 (-1) 0
-      backN = V3 0 1 0
+      corners =
+        [ [p100, p000, p010, p110],
+          [p001, p101, p111, p011],
+          [p000, p001, p011, p010],
+          [p100, p101, p111, p110],
+          [p000, p001, p101, p100],
+          [p010, p011, p111, p110]
+        ]
 
-  bBottom <- blockAt (bottomN + blk)
-  bTop <- blockAt (topN + blk)
-  bLeft <- blockAt (leftN + blk)
-  bRight <- blockAt (rightN + blk)
-  bFront <- blockAt (frontN + blk)
-  bBack <- blockAt (backN + blk)
+      dirs = [NegZ, PosZ, NegX, PosX, NegY, PosY]
+
+  neighborBlocks <- mapM (blockAt . (+ blk) . dirOffset) dirs
 
   let solid b = b /= Air && blockOpaque b
-      showBottom = not (solid bBottom) && faceFacingCamera bottomN
-      showTop = not (solid bTop) && faceFacingCamera topN
-      showLeft = not (solid bLeft) && faceFacingCamera leftN
-      showRight = not (solid bRight) && faceFacingCamera rightN
-      showFront = not (solid bFront) && faceFacingCamera frontN
-      showBack = not (solid bBack) && faceFacingCamera backN
+      faceVisible = zipWith (\normal b -> not (solid b) && faceFacingCamera (realToFrac <$> (dirOffset normal :: V3 Int))) dirs neighborBlocks
+      faceEdges = concat $ catMaybes $ zipWith (\fcs visible -> if visible then Just (loopEdges fcs) else Nothing) corners faceVisible
 
-      bottomEdges = if showBottom then loopEdges [p100, p000, p010, p110] else []
-      topEdges = if showTop then loopEdges [p001, p101, p111, p011] else []
-      leftEdges = if showLeft then loopEdges [p000, p001, p011, p010] else []
-      rightEdges = if showRight then loopEdges [p100, p101, p111, p110] else []
-      frontEdges = if showFront then loopEdges [p000, p001, p101, p100] else []
-      backEdges = if showBack then loopEdges [p010, p011, p111, p110] else []
-
-  pure (bottomEdges ++ topEdges ++ leftEdges ++ rightEdges ++ frontEdges ++ backEdges)
+  pure faceEdges
 
 drawBlockOutlineM :: (MonadEnv m, MonadWorld m, MonadIO m) => m ()
 drawBlockOutlineM = do
@@ -568,12 +517,11 @@ drawBlockOutlineM = do
   whenJustM
     (raycastBlock camPos camFront C.interactionDistance)
     ( \(hitPos, _) -> do
-        vertices <- generateBlockOutlineVerticesM hitPos camPos
+        vertices <- generateBlockOutlineVertices hitPos camPos
         withProgram rsOutlineP $ do
-          bufferSubDataFloats rsOutlineBuf vertices
-          drawBufferCount GL.Lines (length vertices `div` 3) rsOutlineBuf
+          vertexCount <- bufferSubDataForVertices @OutlineVertexIs rsOutlineBuf vertices
+          drawBufferCount GL.Lines vertexCount rsOutlineBuf
           GL.polygonMode $= (GL.Fill, GL.Fill)
-          GL.bindVertexArrayObject $= Nothing
     )
 
 updateFpsTitleM :: (MonadEnv m, MonadIO m) => m ()
